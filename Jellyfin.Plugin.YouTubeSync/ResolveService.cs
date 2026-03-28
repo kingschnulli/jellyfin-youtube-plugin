@@ -42,6 +42,21 @@ public class ResolveService
 
         _logger.LogInformation("Resolving video {VideoId} via yt-dlp", videoId);
 
+        var playbackUrl = await _ytDlpService.GetPlaybackUrlAsync(videoId, cancellationToken).ConfigureAwait(false);
+        if (!string.IsNullOrWhiteSpace(playbackUrl))
+        {
+            var directResult = PlaybackResolveResult.Redirect(playbackUrl);
+            var directCacheMinutes = Plugin.Instance?.Configuration.CacheMinutes ?? 5;
+            _cache.Set(videoId, directResult, directCacheMinutes);
+
+            _logger.LogInformation(
+                "Resolved {VideoId} via direct playback URL – cached for {Minutes} min",
+                videoId,
+                directCacheMinutes);
+
+            return directResult;
+        }
+
         var info = await _ytDlpService.GetVideoInfoAsync(videoId, cancellationToken).ConfigureAwait(false);
         if (info is null)
         {

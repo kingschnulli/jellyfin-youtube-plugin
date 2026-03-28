@@ -1,3 +1,5 @@
+using System;
+using System.IO;
 using System.Net.Mime;
 using System.Threading;
 using System.Threading.Tasks;
@@ -9,7 +11,7 @@ namespace Jellyfin.Plugin.YouTubeSync.Controllers;
 
 /// <summary>
 /// HTTP API controller that resolves a YouTube video ID to either a direct CDN redirect
-/// or a live ffmpeg-muxed DASH stream.
+/// or a DASH stream backed by a growing temporary file.
 ///
 /// Endpoint: GET /YouTubeSync/resolve/{videoId}
 ///
@@ -41,7 +43,7 @@ public class YouTubeSyncController : ControllerBase
     }
 
     /// <summary>
-    /// Resolves a YouTube video ID to either a direct CDN redirect or a live ffmpeg-muxed stream.
+    /// Resolves a YouTube video ID to either a direct CDN redirect or a DASH merge stream.
     /// Returns 503 when no compatible playback format is available.
     /// </summary>
     /// <param name="videoId">The YouTube video ID (e.g. dQw4w9WgXcQ).</param>
@@ -83,20 +85,89 @@ public class YouTubeSyncController : ControllerBase
             return StatusCode(StatusCodes.Status503ServiceUnavailable, "Invalid playback result.");
         }
 
-        var mergedFilePath = await _dashMergeCacheService
-            .GetOrCreateAsync(videoId, result.DashVideoUrl!, result.DashAudioUrl!, HttpContext.RequestAborted)
+        var lease = await _dashMergeCacheService
+            .AcquireAsync(videoId, result.DashVideoUrl!, result.DashAudioUrl!, HttpContext.RequestAborted)
             .ConfigureAwait(false);
 
-        if (string.IsNullOrWhiteSpace(mergedFilePath))
+        if (lease is null)
         {
             return StatusCode(
                 StatusCodes.Status503ServiceUnavailable,
                 "Failed to prepare the merged DASH file. Check the configured ffmpeg path or PATH.");
         }
 
-        _logger.LogInformation("Serving cached DASH merge for video {VideoId} from {MergedFilePath}", videoId, mergedFilePath);
+        HttpContext.Response.OnCompleted(async () =>
+        {
+            await lease.DisposeAsync().ConfigureAwait(false);
+        });
+
+        _logger.LogInformation("Serving DASH merge for video {VideoId} from {MergedFilePath}", videoId, lease.FilePath);
         Response.Headers.CacheControl = "no-store";
-        return PhysicalFile(mergedFilePath, "video/mp4", enableRangeProcessing: true);
+
+        if (lease.IsComplete)
+        {
+            return PhysicalFile(lease.FilePath, "video/mp4", enableRangeProcessing: true);
+        }
+
+        return await StreamGrowingDashFileAsync(videoId, lease, HttpContext.RequestAborted).ConfigureAwait(false);
+    }
+
+    private async Task<IActionResult> StreamGrowingDashFileAsync(
+        string videoId,
+        DashMergeCacheService.DashMergeLease lease,
+        CancellationToken cancellationToken)
+    {
+        Response.StatusCode = StatusCodes.Status200OK;
+        Response.ContentType = "video/mp4";
+        Response.Headers.CacheControl = "no-store";
+
+        await using var input = new FileStream(
+            lease.FilePath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete,
+            81920,
+            FileOptions.Asynchronous | FileOptions.SequentialScan);
+
+        try
+        {
+            await Response.StartAsync(cancellationToken).ConfigureAwait(false);
+            var buffer = new byte[81920];
+
+            while (true)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                var bytesRead = await input.ReadAsync(buffer.AsMemory(0, buffer.Length), cancellationToken)
+                    .ConfigureAwait(false);
+                if (bytesRead > 0)
+                {
+                    await Response.Body.WriteAsync(buffer.AsMemory(0, bytesRead), cancellationToken)
+                        .ConfigureAwait(false);
+                    await Response.Body.FlushAsync(cancellationToken).ConfigureAwait(false);
+                    continue;
+                }
+
+                if (lease.MergeTask.IsCompleted)
+                {
+                    if (!await lease.MergeTask.ConfigureAwait(false))
+                    {
+                        _logger.LogWarning("Growing DASH merge failed before completion for video {VideoId}", videoId);
+                    }
+
+                    break;
+                }
+
+                await Task.Delay(200, cancellationToken).ConfigureAwait(false);
+            }
+
+            return new EmptyResult();
+        }
+        catch (OperationCanceledException)
+        {
+            _logger.LogInformation("Client disconnected while streaming growing DASH file for video {VideoId}", videoId);
+            return new EmptyResult();
+        }
     }
 
     /// <summary>

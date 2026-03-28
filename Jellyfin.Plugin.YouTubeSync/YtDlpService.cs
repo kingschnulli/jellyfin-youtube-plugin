@@ -15,6 +15,8 @@ namespace Jellyfin.Plugin.YouTubeSync;
 /// </summary>
 public class YtDlpService
 {
+    private const string PlaybackFormatSelector = "b[ext=mp4][height<=1080]/b[ext=mp4][height<=720]/b";
+
     private readonly ILogger<YtDlpService> _logger;
 
     /// <summary>Initializes a new instance of the <see cref="YtDlpService"/> class.</summary>
@@ -35,6 +37,35 @@ public class YtDlpService
     {
         var url = $"https://www.youtube.com/watch?v={videoId}";
         return RunYtDlpJsonAsync(new[] { "-J", "--no-playlist", url }, cancellationToken);
+    }
+
+    /// <summary>
+    /// Returns the final playback URL for a single video using yt-dlp's own format selection.
+    /// This may be a direct media URL or an HLS manifest URL.
+    /// </summary>
+    public async Task<string?> GetPlaybackUrlAsync(string videoId, CancellationToken cancellationToken)
+    {
+        var url = $"https://www.youtube.com/watch?v={videoId}";
+        var result = await RunYtDlpTextAsync(
+            new[] { "-f", PlaybackFormatSelector, "--get-url", "--no-playlist", url },
+            cancellationToken).ConfigureAwait(false);
+
+        if (string.IsNullOrWhiteSpace(result))
+        {
+            return null;
+        }
+
+        var lines = result
+            .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+        if (lines.Length == 0)
+        {
+            return null;
+        }
+
+        var playbackUrl = lines[^1];
+        _logger.LogInformation("Resolved playback URL for {VideoId}: {PlaybackKind}", videoId, DescribePlaybackUrl(playbackUrl));
+        return playbackUrl;
     }
 
     /// <summary>
@@ -122,7 +153,7 @@ public class YtDlpService
     }
 
     /// <summary>
-    /// Merges DASH video and audio into a normal MP4 file that can be served with range support.
+    /// Merges DASH video and audio into a fragmented MP4 file that can be read while ffmpeg is still writing.
     /// </summary>
     public async Task<bool> MergeDashToFileAsync(
         string videoUrl,
@@ -236,6 +267,67 @@ public class YtDlpService
         }
     }
 
+    private async Task<string?> RunYtDlpTextAsync(IEnumerable<string> arguments, CancellationToken cancellationToken)
+    {
+        var psi = new ProcessStartInfo
+        {
+            FileName = YtDlpPath,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+
+        foreach (var arg in arguments)
+        {
+            psi.ArgumentList.Add(arg);
+        }
+
+        _logger.LogDebug("Running yt-dlp with arguments: {Arguments}", string.Join(" ", psi.ArgumentList));
+
+        using var process = new Process { StartInfo = psi };
+
+        try
+        {
+            process.Start();
+
+            var outputTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
+            var errorTask = process.StandardError.ReadToEndAsync(cancellationToken);
+
+            await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+
+            var output = await outputTask.ConfigureAwait(false);
+            var error = await errorTask.ConfigureAwait(false);
+
+            if (process.ExitCode != 0)
+            {
+                _logger.LogError(
+                    "yt-dlp exited with code {ExitCode}. Stderr: {Error}",
+                    process.ExitCode,
+                    error);
+                return null;
+            }
+
+            return output.Trim();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to run yt-dlp");
+            return null;
+        }
+    }
+
+    private static string DescribePlaybackUrl(string playbackUrl)
+    {
+        if (playbackUrl.Contains("manifest.googlevideo.com", StringComparison.OrdinalIgnoreCase)
+            || playbackUrl.Contains(".m3u8", StringComparison.OrdinalIgnoreCase))
+        {
+            return "manifest";
+        }
+
+        return "direct media";
+    }
+
     private static IEnumerable<string> BuildFfmpegFileArguments(string videoUrl, string audioUrl, string outputPath)
     {
         yield return "-nostdin";
@@ -260,7 +352,7 @@ public class YtDlpService
         yield return "-c";
         yield return "copy";
         yield return "-movflags";
-        yield return "+faststart";
+        yield return "+frag_keyframe+empty_moov+default_base_moof";
         yield return "-f";
         yield return "mp4";
         yield return outputPath;

@@ -15,8 +15,9 @@ via **yt-dlp**, without pre-downloading any content.
    Calls `yt-dlp -J`, selects the best **progressive ≤1080p** stream, caches the playback
    result for a configurable number of minutes, and returns an **HTTP 302** redirect when a
    direct combined stream exists. If no progressive stream at or below 1080p exists, it picks
-   a **DASH video + audio** pair, merges them through **ffmpeg** into a temporary MP4 file,
-   and serves that file with HTTP range support so Jellyfin can seek normally.
+   a **DASH video + audio** pair, starts an **ffmpeg** merge into a growing temporary MP4 file,
+   begins serving playback once the file has enough initial data, and keeps the partially merged
+   file only while it is actively needed or briefly cached for reuse.
 
 ## Requirements
 
@@ -119,8 +120,8 @@ The plugin targets **`targetAbi: 10.11.6.0`**.  To run on a different version:
 
 ## Known limitations (v1)
 
-- DASH fallback is merged to a temporary MP4 file before serving so Jellyfin receives a normal
-   seekable source with byte-range support.
+- DASH fallback writes to a growing temporary MP4 file so playback can start before the full
+   download completes, but this is still less file-like than a fully premerged asset.
 - Progressive H.264/AAC streams are typically available only up to 720 p on YouTube; 1080p
    progressive is rare, so the DASH merge path will often be used for 1080p playback.
 - No cookie support – age-restricted or member-only videos will not resolve.
