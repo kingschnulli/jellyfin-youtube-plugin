@@ -35,7 +35,23 @@ public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
     public static Plugin? Instance { get; private set; }
 
     /// <inheritdoc />
-    public IEnumerable<PluginPageInfo> GetPages() => Array.Empty<PluginPageInfo>();
+    public IEnumerable<PluginPageInfo> GetPages()
+    {
+        var ns = GetType().Namespace;
+        return new[]
+        {
+            new PluginPageInfo
+            {
+                Name = "youtubeSyncConfig",
+                EmbeddedResourcePath = $"{ns}.Web.youtubeSyncConfig.html"
+            },
+            new PluginPageInfo
+            {
+                Name = "youtubeSyncConfigjs",
+                EmbeddedResourcePath = $"{ns}.Web.youtubeSyncConfig.js"
+            }
+        };
+    }
 }
 
 /// <summary>Registers all plugin services with the Jellyfin DI container.</summary>

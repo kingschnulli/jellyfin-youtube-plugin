@@ -21,9 +21,9 @@ via **yt-dlp**, without pre-downloading any content.
 
 | Dependency | Notes |
 |---|---|
-| Jellyfin | ≥ 10.9.0 |
+| Jellyfin | 10.11.6 |
 | yt-dlp | must be on PATH inside the container (or configure full path in plugin settings) |
-| .NET SDK | 8.0 (build only) |
+| .NET SDK | 9.0 (build only) |
 
 ## Building
 
@@ -78,34 +78,36 @@ The workflow (`.github/workflows/release.yml`) will:
 
 ## Configuration
 
-Open **Dashboard → Plugins → YouTubeSync → Settings** after installation.
+Open **Dashboard → Plugins → YouTubeSync → Settings** after installation.  All settings are
+managed through the UI — no manual file editing is required.
+
+### General settings
 
 | Setting | Default | Description |
 |---|---|---|
-| `YtDlpPath` | `yt-dlp` | Path to the yt-dlp binary |
-| `LibraryBasePath` | `/media/youtube` | Root folder inside a Jellyfin library |
-| `JellyfinBaseUrl` | `http://localhost:8096` | Externally accessible Jellyfin URL written into `.strm` files – **set this to your public URL** when clients access Jellyfin remotely |
-| `CacheMinutes` | `5` | CDN URL cache TTL in minutes |
-| `MaxVideosPerSource` | `200` | Max videos per sync run (0 = unlimited) |
+| yt-dlp executable path | `yt-dlp` | Path to the yt-dlp binary (must be on PATH or provide the full path) |
+| Library base path | `/media/youtube` | Root folder inside a Jellyfin library where .strm/.nfo files are written |
+| Jellyfin base URL | `http://localhost:8096` | Externally accessible Jellyfin URL written into `.strm` resolver links — **set this to your public URL** when clients access Jellyfin remotely |
+| CDN URL cache duration | `5` min | How long a resolved CDN URL is cached in memory before being re-fetched |
+| Max videos per source | `200` | Maximum number of videos to sync per channel or playlist (0 = unlimited) |
 
 ### Adding a source (channel or playlist)
 
-Sources are configured as `SourceDefinition` entries.  Edit `PluginConfiguration.xml` directly
-or (once a config page is implemented) via the UI:
+Click **+ Add Source** on the settings page.  Each source requires:
 
-```xml
-<SourceDefinition>
-  <Id>UCxxxxxxxxxxxxxxxxxxxxxx</Id>   <!-- channel ID or playlist ID -->
-  <Type>Channel</Type>               <!-- Channel | Playlist -->
-  <Mode>Series</Mode>                <!-- Series | Movies -->
-  <Name>My Favourite Channel</Name>
-  <Description>Optional description shown in the .nfo</Description>
-</SourceDefinition>
-```
+| Field | Description |
+|---|---|
+| Channel / Playlist ID | YouTube channel ID (e.g. `UCxxxxxxxxxxxxxxxxxxxxxx`) or playlist ID (e.g. `PLxxxxxxxxxxxxxxxxxxxxxx`) |
+| Display name | Used as the folder name inside your Jellyfin library |
+| Source type | `Channel` or `Playlist` |
+| Library mode | `Series` — videos appear as TV-show episodes; `Movies` — each video appears as an individual film |
+| Description | Optional text written into the source `.nfo` file |
+
+Click **Save** after adding or modifying sources.
 
 ## Adjusting for other Jellyfin versions
 
-The plugin targets **`targetAbi: 10.9.0.0`**.  To run on a different version:
+The plugin targets **`targetAbi: 10.11.6.0`**.  To run on a different version:
 
 1. Change the `<PackageReference>` versions in `Jellyfin.Plugin.YouTubeSync.csproj`
    to match your Jellyfin version.
