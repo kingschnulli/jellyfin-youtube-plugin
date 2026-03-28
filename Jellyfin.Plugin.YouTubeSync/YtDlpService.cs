@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Linq;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
@@ -67,6 +68,53 @@ public class YtDlpService
         }
 
         return list;
+    }
+
+    /// <summary>
+    /// Fetches metadata (title, description, thumbnail URL, detected type) for a channel or playlist URL.
+    /// Only the first playlist entry is requested so the call is fast.
+    /// </summary>
+    public async Task<SourceInfo?> GetSourceInfoAsync(string url, CancellationToken cancellationToken)
+    {
+        // --playlist-end 1 limits video retrieval but the container metadata is always present.
+        var args = new[] { "--flat-playlist", "-J", "--playlist-end", "1", url };
+        var result = await RunYtDlpJsonAsync(args, cancellationToken).ConfigureAwait(false);
+        if (result is null)
+        {
+            return null;
+        }
+
+        var title = result["title"]?.GetValue<string>() ?? string.Empty;
+        var description = result["description"]?.GetValue<string>() ?? string.Empty;
+
+        // Pick the thumbnail with the greatest width (best quality).
+        var thumbnailUrl = string.Empty;
+        var thumbnails = result["thumbnails"]?.AsArray();
+        if (thumbnails is { Count: > 0 })
+        {
+            var best = thumbnails
+                .Where(t => t is not null)
+                .OrderByDescending(t =>
+                {
+                    try { return t!["width"]?.GetValue<int>() ?? 0; }
+                    catch (InvalidOperationException) { return 0; }
+                })
+                .FirstOrDefault();
+            thumbnailUrl = best?["url"]?.GetValue<string>() ?? string.Empty;
+        }
+
+        // Detect source type from yt-dlp's extractor key or URL pattern.
+        var extractorKey = result["extractor_key"]?.GetValue<string>() ?? string.Empty;
+        var isPlaylist = url.Contains("playlist?list=", StringComparison.OrdinalIgnoreCase)
+                         || extractorKey.Equals("YoutubePlaylist", StringComparison.OrdinalIgnoreCase);
+
+        return new SourceInfo
+        {
+            Title = title,
+            Description = description,
+            ThumbnailUrl = thumbnailUrl,
+            Type = isPlaylist ? SourceType.Playlist : SourceType.Channel
+        };
     }
 
     private async Task<JsonNode?> RunYtDlpJsonAsync(IEnumerable<string> arguments, CancellationToken cancellationToken)

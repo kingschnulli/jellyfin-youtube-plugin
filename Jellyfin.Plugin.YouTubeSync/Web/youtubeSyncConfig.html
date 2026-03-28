@@ -60,8 +60,14 @@
                 <h3 id="editSourceTitle" class="sectionTitle">Add Source</h3>
 
                 <div class="inputContainer">
-                    <input is="emby-input" type="text" id="editSourceId" label="Channel / Playlist ID" />
-                    <div class="fieldDescription">YouTube channel ID (e.g. <code>UCxxxxxxxxxxxxxxxxxxxxxx</code>) or playlist ID (e.g. <code>PLxxxxxxxxxxxxxxxxxxxxxx</code>).</div>
+                    <input is="emby-input" type="url" id="editSourceUrl" label="YouTube URL" />
+                    <div class="fieldDescription">
+                        Paste the full YouTube channel or playlist URL, for example:
+                        <code>https://www.youtube.com/@ChannelName</code>,
+                        <code>https://www.youtube.com/channel/UCxxxxxx</code>, or
+                        <code>https://www.youtube.com/playlist?list=PLxxxxxx</code>.
+                        A bare channel/playlist ID is also accepted for backward compatibility.
+                    </div>
                 </div>
 
                 <div class="inputContainer">

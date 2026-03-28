@@ -15,6 +15,12 @@ export default function (view) {
             .replace(/"/g, '&quot;');
     }
 
+    /** Detect whether a YouTube URL refers to a playlist or a channel. */
+    function detectSourceType(url) {
+        if (!url) return 'Channel';
+        return /[?&]list=/.test(url) ? 'Playlist' : 'Channel';
+    }
+
     /* ── sources list rendering ──────────────────────────── */
 
     function renderSources() {
@@ -29,7 +35,8 @@ export default function (view) {
                 + '<div style="flex:1;min-width:0;">'
                 + '<div style="font-weight:600;">' + escapeHtml(s.Name || s.Id) + '</div>'
                 + '<div class="fieldDescription" style="margin:0;">'
-                + escapeHtml(s.Type) + ' &bull; ' + escapeHtml(s.Mode) + ' &bull; ID:&nbsp;' + escapeHtml(s.Id)
+                + escapeHtml(s.Type) + ' &bull; ' + escapeHtml(s.Mode) + ' &bull; '
+                + escapeHtml(s.Id)
                 + '</div>'
                 + (s.Description
                     ? '<div class="fieldDescription" style="margin:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'
@@ -64,7 +71,7 @@ export default function (view) {
             : { Id: '', Name: '', Type: 'Channel', Mode: 'Series', Description: '' };
 
         view.querySelector('#editSourceTitle').textContent = index >= 0 ? 'Edit Source' : 'Add Source';
-        view.querySelector('#editSourceId').value = s.Id;
+        view.querySelector('#editSourceUrl').value = s.Id;
         view.querySelector('#editSourceName').value = s.Name;
         view.querySelector('#editSourceType').value = s.Type;
         view.querySelector('#editSourceMode').value = s.Mode;
@@ -123,35 +130,66 @@ export default function (view) {
         openEditForm(-1);
     });
 
+    // Auto-detect source type when the URL field changes.
+    view.querySelector('#editSourceUrl').addEventListener('input', function () {
+        const detected = detectSourceType(this.value.trim());
+        view.querySelector('#editSourceType').value = detected;
+    });
+
     view.querySelector('#saveSourceBtn').addEventListener('click', function () {
-        const id = view.querySelector('#editSourceId').value.trim();
-        const name = view.querySelector('#editSourceName').value.trim();
+        const id = view.querySelector('#editSourceUrl').value.trim();
 
         if (!id) {
-            Dashboard.processErrorResponse({ statusText: 'Channel / Playlist ID is required.' });
+            Dashboard.processErrorResponse({ statusText: 'YouTube URL is required.' });
             return;
         }
+
+        function commitSource(name, description) {
+            const src = {
+                Id: id,
+                Name: name,
+                Type: view.querySelector('#editSourceType').value,
+                Mode: view.querySelector('#editSourceMode').value,
+                Description: description
+            };
+
+            if (editIndex >= 0) {
+                sources[editIndex] = src;
+            } else {
+                sources.push(src);
+            }
+
+            closeEditForm();
+            renderSources();
+        }
+
+        const name = view.querySelector('#editSourceName').value.trim();
+        const description = view.querySelector('#editSourceDescription').value.trim();
+
+        // If the user left the name blank, fetch it from YouTube before saving.
         if (!name) {
-            Dashboard.processErrorResponse({ statusText: 'Display name is required.' });
-            return;
-        }
+            Dashboard.showLoadingMsg();
+            fetch(ApiClient.getUrl('/YouTubeSync/source-info') + '?url=' + encodeURIComponent(id), {
+                headers: { 'X-Emby-Token': ApiClient.accessToken() }
+            }).then(function (resp) {
+                if (!resp.ok) throw new Error('HTTP ' + resp.status);
+                return resp.json();
+            }).then(function (info) {
+                Dashboard.hideLoadingMsg();
+                if (info.Type) {
+                    view.querySelector('#editSourceType').value = info.Type;
+                }
 
-        const src = {
-            Id: id,
-            Name: name,
-            Type: view.querySelector('#editSourceType').value,
-            Mode: view.querySelector('#editSourceMode').value,
-            Description: view.querySelector('#editSourceDescription').value.trim()
-        };
-
-        if (editIndex >= 0) {
-            sources[editIndex] = src;
+                commitSource(info.Title || id, info.Description || description);
+            }).catch(function () {
+                Dashboard.hideLoadingMsg();
+                // Inform the user and fall back to saving with the URL as the name.
+                Dashboard.alert({ message: 'Could not fetch metadata from YouTube (is yt-dlp installed?). The URL will be used as the display name — you can rename it later.' });
+                commitSource(id, description);
+            });
         } else {
-            sources.push(src);
+            commitSource(name, description);
         }
-
-        closeEditForm();
-        renderSources();
     });
 
     view.querySelector('#cancelSourceBtn').addEventListener('click', closeEditForm);
