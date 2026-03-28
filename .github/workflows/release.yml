@@ -52,7 +52,7 @@ jobs:
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '8.0.x'
+          dotnet-version: '9.0.x'
 
       # ── 5. Build & publish (Release) ───────────────────────────────────────
       - name: Publish plugin
@@ -90,10 +90,7 @@ jobs:
       # ── 9. Update manifest.json on the default branch ─────────────────────
       - name: Update manifest.json
         run: |
-          DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/${{ steps.version.outputs.ZIP_NAME }}"
-          TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-          VERSION="${{ steps.version.outputs.ASSEMBLY_VERSION }}"
-          CHECKSUM="${{ steps.checksum.outputs.MD5 }}"
+          export TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
           python3 - << 'PYEOF'
           import json, os
@@ -105,7 +102,7 @@ jobs:
           new_entry = {
               "version":    os.environ["VERSION"],
               "changelog":  f"Release {os.environ['VERSION']}",
-              "targetAbi":  "10.9.0.0",
+              "targetAbi":  "10.11.6.0",
               "sourceUrl":  os.environ["DOWNLOAD_URL"],
               "checksum":   os.environ["CHECKSUM"],
               "timestamp":  os.environ["TIMESTAMP"]
@@ -121,7 +118,6 @@ jobs:
         env:
           VERSION: ${{ steps.version.outputs.ASSEMBLY_VERSION }}
           CHECKSUM: ${{ steps.checksum.outputs.MD5 }}
-          TIMESTAMP: ${{ steps.version.outputs.TAG_VERSION }}   # reuse tag as timestamp seed
           DOWNLOAD_URL: "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/${{ steps.version.outputs.ZIP_NAME }}"
 
       # ── 10. Commit the updated manifest.json back to main ─────────────────

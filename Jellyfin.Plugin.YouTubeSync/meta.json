@@ -6,8 +6,8 @@
   "overview": "YouTube channel and playlist sync for Jellyfin via yt-dlp",
   "owner": "kingschnulli",
   "version": "1.0.0.0",
-  "targetAbi": "10.9.0.0",
-  "framework": "net8.0",
+  "targetAbi": "10.11.6.0",
+  "framework": "net9.0",
   "assemblies": [
     "Jellyfin.Plugin.YouTubeSync.dll"
   ]
