@@ -261,6 +261,8 @@ public class YtDlpService
         yield return "copy";
         yield return "-movflags";
         yield return "+faststart";
+        yield return "-f";
+        yield return "mp4";
         yield return outputPath;
     }
 

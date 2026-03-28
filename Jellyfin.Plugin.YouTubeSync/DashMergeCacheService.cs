@@ -73,7 +73,7 @@ public class DashMergeCacheService
 
         Directory.CreateDirectory(Path.GetDirectoryName(cachePath)!);
 
-        var tempPath = cachePath + ".tmp";
+        var tempPath = cachePath + ".tmp.mp4";
         TryDeleteFile(tempPath);
 
         _logger.LogInformation("Creating cached DASH merge for video {VideoId} at {CachePath}", videoId, cachePath);
