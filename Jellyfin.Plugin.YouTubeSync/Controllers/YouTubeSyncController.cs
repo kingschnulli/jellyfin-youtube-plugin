@@ -24,16 +24,19 @@ public class YouTubeSyncController : ControllerBase
 {
     private readonly DashMergeCacheService _dashMergeCacheService;
     private readonly ResolveService _resolveService;
+    private readonly YtDlpService _ytDlpService;
     private readonly ILogger<YouTubeSyncController> _logger;
 
     /// <summary>Initializes a new instance of the <see cref="YouTubeSyncController"/> class.</summary>
     public YouTubeSyncController(
         DashMergeCacheService dashMergeCacheService,
         ResolveService resolveService,
+        YtDlpService ytDlpService,
         ILogger<YouTubeSyncController> logger)
     {
         _dashMergeCacheService = dashMergeCacheService;
         _resolveService = resolveService;
+        _ytDlpService = ytDlpService;
         _logger = logger;
     }
 
