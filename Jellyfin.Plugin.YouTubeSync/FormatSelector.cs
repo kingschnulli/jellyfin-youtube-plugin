@@ -8,11 +8,13 @@ namespace Jellyfin.Plugin.YouTubeSync;
 /// Selects the best Jellyfin-compatible (progressive, ≤1080p) format
 /// from a yt-dlp JSON response.
 ///
-/// Selection uses a tiered fallback strategy (mirrors <c>b[ext=mp4][height&lt;=1080]/b[ext=mp4][height&lt;=720]/b</c>):
-///   Tier 1: Progressive MP4 stream ≤1080p  – highest resolution, then highest bitrate.
-///   Tier 2: Progressive MP4 stream ≤720p   – fallback when no ≤1080p MP4 exists.
-///   Tier 3: Any progressive stream          – last resort when no MP4 is available.
+/// Selection uses a tiered fallback strategy:
+///   Tier 1: Progressive stream ≤1080p  – highest resolution, then MP4-preferred, then highest bitrate.
+///   Tier 2: Any progressive stream     – last resort when no ≤1080p progressive stream exists.
 ///   DASH-only (split video/audio) streams are always rejected.
+///
+/// MP4 is preferred as a secondary tiebreaker (same resolution), but a higher-resolution
+/// non-MP4 stream (e.g. H264/ADTS in a TS container) is always preferred over a lower-resolution MP4.
 /// </summary>
 public class FormatSelector
 {
@@ -37,12 +39,10 @@ public class FormatSelector
             return null;
         }
 
-        // Tier 1: best progressive MP4 ≤1080p (mirrors: b[ext=mp4][height<=1080])
-        var best = PickBest(formats, requireMp4: true, maxHeight: 1080)
-            // Tier 2: best progressive MP4 ≤720p (mirrors: b[ext=mp4][height<=720])
-            ?? PickBest(formats, requireMp4: true, maxHeight: 720)
-            // Tier 3: best progressive stream of any container (mirrors: b)
-            ?? PickBest(formats, requireMp4: false, maxHeight: null);
+        // Tier 1: best progressive stream ≤1080p – highest resolution wins; MP4 preferred at equal resolution.
+        var best = PickBest(formats, maxHeight: 1080)
+            // Tier 2: any progressive stream – fallback when no ≤1080p progressive stream exists.
+            ?? PickBest(formats, maxHeight: null);
 
         if (best is null)
         {
@@ -63,16 +63,11 @@ public class FormatSelector
         return url;
     }
 
-    private static JsonNode? PickBest(JsonArray formats, bool requireMp4, int? maxHeight)
+    private static JsonNode? PickBest(JsonArray formats, int? maxHeight)
     {
         var query = formats
             .Where(f => f is not null)
             .Where(IsProgressive);
-
-        if (requireMp4)
-        {
-            query = query.Where(IsMp4);
-        }
 
         if (maxHeight.HasValue)
         {
@@ -82,6 +77,7 @@ public class FormatSelector
 
         return query
             .OrderByDescending(f => GetInt(f, "height"))
+            .ThenByDescending(f => IsMp4(f) ? 1 : 0)
             .ThenByDescending(f => GetDouble(f, "tbr"))
             .FirstOrDefault();
     }
