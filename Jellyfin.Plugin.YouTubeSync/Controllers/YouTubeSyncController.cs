@@ -23,12 +23,17 @@ namespace Jellyfin.Plugin.YouTubeSync.Controllers;
 public class YouTubeSyncController : ControllerBase
 {
     private readonly ResolveService _resolveService;
+    private readonly YtDlpService _ytDlpService;
     private readonly ILogger<YouTubeSyncController> _logger;
 
     /// <summary>Initializes a new instance of the <see cref="YouTubeSyncController"/> class.</summary>
-    public YouTubeSyncController(ResolveService resolveService, ILogger<YouTubeSyncController> logger)
+    public YouTubeSyncController(
+        ResolveService resolveService,
+        YtDlpService ytDlpService,
+        ILogger<YouTubeSyncController> logger)
     {
         _resolveService = resolveService;
+        _ytDlpService = ytDlpService;
         _logger = logger;
     }
 
@@ -65,5 +70,36 @@ public class YouTubeSyncController : ControllerBase
         }
 
         return Redirect(url);
+    }
+
+    /// <summary>
+    /// Fetches metadata (title, description, thumbnail URL, type) for a YouTube channel or playlist URL.
+    /// Called by the admin configuration UI to auto-populate source details.
+    /// </summary>
+    /// <param name="url">The YouTube channel or playlist URL.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>A <see cref="SourceInfo"/> object, or 400/503 on error.</returns>
+    [HttpGet("source-info")]
+    [ProducesResponseType(typeof(SourceInfo), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status503ServiceUnavailable)]
+    public async Task<IActionResult> GetSourceInfo([FromQuery] string url, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(url))
+        {
+            return BadRequest("url query parameter is required.");
+        }
+
+        _logger.LogInformation("Source-info request for URL {Url}", url);
+
+        var info = await _ytDlpService.GetSourceInfoAsync(url, cancellationToken).ConfigureAwait(false);
+        if (info is null)
+        {
+            return StatusCode(
+                StatusCodes.Status503ServiceUnavailable,
+                "Failed to fetch source info from YouTube. Check that yt-dlp is installed and the URL is valid.");
+        }
+
+        return Ok(info);
     }
 }

@@ -48,10 +48,44 @@ public class SyncService
     private async Task SyncSourceAsync(SourceDefinition source, CancellationToken cancellationToken)
     {
         var config = Plugin.Instance!.Configuration;
-        var sourceDir = Path.Combine(config.LibraryBasePath, SanitizeFileName(source.Name));
+
+        // Auto-resolve display name / description / thumbnail from YouTube when not manually set.
+        var name = source.Name;
+        var description = source.Description;
+        var thumbnailUrl = source.ThumbnailUrl;
+
+        if (string.IsNullOrEmpty(name))
+        {
+            _logger.LogInformation(
+                "No display name configured for source '{Id}'; fetching metadata from YouTube.",
+                source.Id);
+
+            var info = await _ytDlpService.GetSourceInfoAsync(source.Url, cancellationToken)
+                .ConfigureAwait(false);
+
+            if (info is not null)
+            {
+                name = string.IsNullOrEmpty(info.Title) ? source.Id : info.Title;
+                if (string.IsNullOrEmpty(description))
+                {
+                    description = info.Description;
+                }
+
+                if (string.IsNullOrEmpty(thumbnailUrl))
+                {
+                    thumbnailUrl = info.ThumbnailUrl;
+                }
+            }
+            else
+            {
+                name = source.Id;
+            }
+        }
+
+        var sourceDir = Path.Combine(config.LibraryBasePath, SanitizeFileName(name));
 
         Directory.CreateDirectory(sourceDir);
-        WriteSourceNfo(source, sourceDir);
+        WriteSourceNfo(source, sourceDir, name, description, thumbnailUrl);
 
         var entries = await _ytDlpService
             .GetPlaylistEntriesAsync(source.Url, config.MaxVideosPerSource, cancellationToken)
@@ -60,7 +94,7 @@ public class SyncService
         _logger.LogInformation(
             "Syncing {Count} video(s) for source '{Name}'",
             entries.Count,
-            source.Name);
+            name);
 
         foreach (var entry in entries)
         {
@@ -113,7 +147,12 @@ public class SyncService
 
     // ── NFO builders ──────────────────────────────────────────────────────────
 
-    private static void WriteSourceNfo(SourceDefinition source, string dir)
+    private static void WriteSourceNfo(
+        SourceDefinition source,
+        string dir,
+        string name,
+        string description,
+        string thumbnailUrl)
     {
         bool isSeries = source.Type == SourceType.Channel || source.Mode == SourceMode.Series;
         var nfoFileName = isSeries ? "tvshow.nfo" : "movie.nfo";
@@ -125,31 +164,43 @@ public class SyncService
         }
 
         var content = isSeries
-            ? BuildTvShowNfo(source)
-            : BuildCollectionNfo(source);
+            ? BuildTvShowNfo(source, name, description, thumbnailUrl)
+            : BuildCollectionNfo(source, name, description, thumbnailUrl);
 
         File.WriteAllText(nfoPath, content, Encoding.UTF8);
     }
 
-    private static string BuildTvShowNfo(SourceDefinition source) =>
-        $"""
+    private static string BuildTvShowNfo(SourceDefinition source, string name, string description, string thumbnailUrl)
+    {
+        var thumb = string.IsNullOrEmpty(thumbnailUrl)
+            ? string.Empty
+            : $"\n  <thumb aspect=\"poster\">{Xml(thumbnailUrl)}</thumb>";
+
+        return $"""
         <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
         <tvshow>
-          <title>{Xml(source.Name)}</title>
-          <plot>{Xml(source.Description)}</plot>
-          <uniqueid type="youtube" default="true">{Xml(source.Id)}</uniqueid>
+          <title>{Xml(name)}</title>
+          <plot>{Xml(description)}</plot>
+          <uniqueid type="youtube" default="true">{Xml(source.Id)}</uniqueid>{thumb}
         </tvshow>
         """;
+    }
 
-    private static string BuildCollectionNfo(SourceDefinition source) =>
-        $"""
+    private static string BuildCollectionNfo(SourceDefinition source, string name, string description, string thumbnailUrl)
+    {
+        var thumb = string.IsNullOrEmpty(thumbnailUrl)
+            ? string.Empty
+            : $"\n  <thumb aspect=\"poster\">{Xml(thumbnailUrl)}</thumb>";
+
+        return $"""
         <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
         <movie>
-          <title>{Xml(source.Name)}</title>
-          <plot>{Xml(source.Description)}</plot>
-          <uniqueid type="youtube" default="true">{Xml(source.Id)}</uniqueid>
+          <title>{Xml(name)}</title>
+          <plot>{Xml(description)}</plot>
+          <uniqueid type="youtube" default="true">{Xml(source.Id)}</uniqueid>{thumb}
         </movie>
         """;
+    }
 
     private static string BuildVideoNfo(string title, string description, string videoId, string uploadDate)
     {
