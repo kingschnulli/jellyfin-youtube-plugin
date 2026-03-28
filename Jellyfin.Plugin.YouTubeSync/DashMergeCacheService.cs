@@ -57,7 +57,7 @@ public class DashMergeCacheService
 
             session.AddReader();
             Touch(session.FilePath);
-            return new DashMergeLease(this, session);
+            return new DashMergeLease(session.FilePath, session.MergeTask, () => Release(session));
         }
         catch
         {
@@ -206,24 +206,26 @@ public class DashMergeCacheService
     /// </summary>
     public sealed class DashMergeLease : IAsyncDisposable
     {
-        private readonly DashMergeCacheService _owner;
-        private readonly DashMergeSession _session;
+        private readonly string _filePath;
+        private readonly Task<bool> _mergeTask;
+        private readonly Action _release;
         private bool _disposed;
 
-        internal DashMergeLease(DashMergeCacheService owner, DashMergeSession session)
+        internal DashMergeLease(string filePath, Task<bool> mergeTask, Action release)
         {
-            _owner = owner;
-            _session = session;
+            _filePath = filePath;
+            _mergeTask = mergeTask;
+            _release = release;
         }
 
         /// <summary>Gets the local file path being written/read.</summary>
-        public string FilePath => _session.FilePath;
+        public string FilePath => _filePath;
 
         /// <summary>Gets the background merge task.</summary>
-        public Task<bool> MergeTask => _session.MergeTask;
+        public Task<bool> MergeTask => _mergeTask;
 
         /// <summary>Gets a value indicating whether the merge is already complete.</summary>
-        public bool IsComplete => _session.MergeTask.IsCompletedSuccessfully && _session.MergeTask.Result;
+        public bool IsComplete => _mergeTask.IsCompletedSuccessfully && _mergeTask.Result;
 
         /// <inheritdoc />
         public ValueTask DisposeAsync()
@@ -234,7 +236,7 @@ public class DashMergeCacheService
             }
 
             _disposed = true;
-            _owner.Release(_session);
+            _release();
             return ValueTask.CompletedTask;
         }
     }
