@@ -210,7 +210,7 @@ public class DashMergeCacheService
         private readonly DashMergeSession _session;
         private bool _disposed;
 
-        private DashMergeLease(DashMergeCacheService owner, DashMergeSession session)
+        internal DashMergeLease(DashMergeCacheService owner, DashMergeSession session)
         {
             _owner = owner;
             _session = session;
