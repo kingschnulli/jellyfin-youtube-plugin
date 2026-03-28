@@ -14,8 +14,8 @@ namespace Jellyfin.Plugin.YouTubeSync;
 /// </summary>
 public class YtDlpService
 {
-    private const string BroadCompatibility720pSelector = "b[protocol!*=m3u8][ext=mp4][height<=720]/b[ext=mp4][height<=720]/b[height<=720]";
-    private const string Balanced1080pSelector = "b[ext=mp4][height<=1080]/b[ext=mp4][height<=720]/b";
+    private const string BroadCompatibility720pSelector = "b[protocol!*=m3u8][ext=mp4][height=720]/b[protocol!*=m3u8][ext=mp4][height<=720]/b[height=720]/b[height<=720]";
+    private const string Balanced1080pSelector = "b[height=1080]/b[height=720]/b[height<=1080]/b[height<=720]/b";
     private const string MaximumQualitySelector = "b";
 
     private readonly ILogger<YtDlpService> _logger;
