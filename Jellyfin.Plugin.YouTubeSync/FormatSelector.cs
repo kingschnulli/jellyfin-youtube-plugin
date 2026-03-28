@@ -11,9 +11,9 @@ namespace Jellyfin.Plugin.YouTubeSync;
 /// Selects the best playback strategy from a yt-dlp JSON response.
 ///
 /// Selection uses one rule set:
-///   1. Prefer a progressive stream at or below 1080p.
-///   2. Otherwise select a DASH video-only stream at or below 1080p plus a DASH audio-only stream
-///      so the controller can live-merge them with ffmpeg.
+///   1. Choose the highest-quality result at or below 1080p.
+///   2. A higher-resolution DASH pair beats a lower-resolution progressive stream.
+///   3. At equal resolution, prefer the progressive stream to avoid live muxing when quality is the same.
 /// </summary>
 public class FormatSelector
 {
@@ -41,9 +41,11 @@ public class FormatSelector
         LogAvailableFormats(formats);
 
         var bestProgressive = PickBestProgressive(formats, maxHeight: 1080);
-        if (bestProgressive is not null)
+        var dashPair = PickBestDashPair(formats, maxHeight: 1080);
+
+        if (ShouldUseProgressive(bestProgressive, dashPair))
         {
-            var url = bestProgressive["url"]?.GetValue<string>();
+            var url = bestProgressive!["url"]?.GetValue<string>();
             if (!string.IsNullOrWhiteSpace(url))
             {
                 _logger.LogInformation(
@@ -59,7 +61,6 @@ public class FormatSelector
             }
         }
 
-        var dashPair = PickBestDashPair(formats, maxHeight: 1080);
         if (dashPair is null)
         {
             _logger.LogInformation(
@@ -120,6 +121,29 @@ public class FormatSelector
         return !string.IsNullOrWhiteSpace(videoUrl) && !string.IsNullOrWhiteSpace(audioUrl)
             ? new DashPair(video!, audio!, videoUrl, audioUrl)
             : null;
+    }
+
+    private static bool ShouldUseProgressive(JsonNode? progressive, DashPair? dashPair)
+    {
+        if (progressive is null)
+        {
+            return false;
+        }
+
+        if (dashPair is null)
+        {
+            return true;
+        }
+
+        var progressiveHeight = GetInt(progressive, "height");
+        var dashHeight = GetInt(dashPair.Video, "height");
+
+        if (progressiveHeight != dashHeight)
+        {
+            return progressiveHeight > dashHeight;
+        }
+
+        return GetDouble(progressive, "tbr") >= GetDouble(dashPair.Video, "tbr");
     }
 
     // ── logging ──────────────────────────────────────────────────────────────
