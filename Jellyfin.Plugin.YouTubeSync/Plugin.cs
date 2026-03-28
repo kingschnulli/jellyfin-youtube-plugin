@@ -11,8 +11,8 @@ using Microsoft.Extensions.DependencyInjection;
 
 namespace Jellyfin.Plugin.YouTubeSync;
 
-/// <summary>Main plugin entry point. Registers all plugin services with the Jellyfin DI container.</summary>
-public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages, IPluginServiceRegistrator
+/// <summary>Main plugin entry point.</summary>
+public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
 {
     /// <summary>
     /// Initializes a new instance of the <see cref="Plugin"/> class.
@@ -36,7 +36,11 @@ public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages, IPluginServ
 
     /// <inheritdoc />
     public IEnumerable<PluginPageInfo> GetPages() => Array.Empty<PluginPageInfo>();
+}
 
+/// <summary>Registers all plugin services with the Jellyfin DI container.</summary>
+public class PluginServiceRegistrator : IPluginServiceRegistrator
+{
     /// <inheritdoc />
     public void RegisterServices(IServiceCollection serviceCollection, IServerApplicationHost applicationHost)
     {
