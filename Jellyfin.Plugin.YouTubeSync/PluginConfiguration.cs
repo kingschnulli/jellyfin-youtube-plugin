@@ -34,14 +34,6 @@ public class PluginConfiguration : BasePluginConfiguration
     public int CacheMinutes { get; set; } = 5;
 
     /// <summary>
-    /// Gets or sets the path to the FFmpeg executable used by yt-dlp when merging DASH streams.
-    /// Defaults to "ffmpeg" (expects it to be on PATH).
-    /// Set this to the full path if Jellyfin's FFmpeg is not on the system PATH
-    /// (e.g. /usr/lib/jellyfin-ffmpeg/ffmpeg).
-    /// </summary>
-    public string FfmpegPath { get; set; } = "ffmpeg";
-
-    /// <summary>
     /// Gets or sets the maximum number of videos to sync per source.
     /// Set to 0 for no limit (not recommended for large channels).
     /// </summary>

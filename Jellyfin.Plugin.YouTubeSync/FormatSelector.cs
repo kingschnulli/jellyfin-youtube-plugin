@@ -8,36 +8,16 @@ using Microsoft.Extensions.Logging;
 namespace Jellyfin.Plugin.YouTubeSync;
 
 /// <summary>
-/// Describes a format (or pair of formats) selected for playback.
-/// When <see cref="AudioFormatId"/> is set the two streams must be muxed on-the-fly;
-/// when it is <c>null</c> <see cref="VideoUrl"/> is a self-contained progressive stream.
-/// </summary>
-public sealed record SelectedFormat(
-    string VideoUrl,
-    string VideoFormatId,
-    int Height,
-    string Ext,
-    string? AudioUrl = null,
-    string? AudioFormatId = null)
-{
-    /// <summary>
-    /// <c>true</c> when video and audio are in separate DASH streams that must be muxed
-    /// before playback; <c>false</c> for a self-contained progressive stream.
-    /// </summary>
-    public bool NeedsMuxing => AudioUrl is not null;
-}
-
-/// <summary>
-/// Selects the best Jellyfin-compatible format (or pair of formats) from a yt-dlp JSON response.
+/// Selects the best Jellyfin-compatible (progressive, ≤1080p) format
+/// from a yt-dlp JSON response.
 ///
 /// Selection uses a tiered fallback strategy:
-///   Tier 1: Progressive stream ≤1080p   – single combined file, highest resolution then MP4-preferred then bitrate.
-///   Tier 2: Any progressive stream      – same ordering, no height cap.
-///   Tier 3: DASH video ≤1080p + audio   – best H.264 (avc1) video paired with best AAC audio; needs muxing.
-///   Tier 4: Any DASH video + audio      – last resort with no height cap.
+///   Tier 1: Progressive stream ≤1080p  – highest resolution, then MP4-preferred, then highest bitrate.
+///   Tier 2: Any progressive stream     – last resort when no ≤1080p progressive stream exists.
+///   DASH-only (split video/audio) streams are always rejected.
 ///
-/// DASH streams (Tiers 3/4) are streamed via a yt-dlp proxy that merges them on-the-fly using FFmpeg.
-/// MP4/H.264 is preferred over other codecs at the same resolution.
+/// MP4 is preferred as a secondary tiebreaker (same resolution), but a higher-resolution
+/// non-MP4 stream (e.g. H264/ADTS in a TS container) is always preferred over a lower-resolution MP4.
 /// </summary>
 public class FormatSelector
 {
@@ -50,10 +30,10 @@ public class FormatSelector
     }
 
     /// <summary>
-    /// Returns a <see cref="SelectedFormat"/> describing the best stream(s) for playback,
-    /// or <c>null</c> when no usable format is available.
+    /// Returns the direct CDN URL for the best progressive format, or <c>null</c> when
+    /// no compatible progressive format exists (i.e. only split DASH streams are available).
     /// </summary>
-    public SelectedFormat? SelectBestFormat(JsonNode videoInfo)
+    public string? SelectBestFormat(JsonNode videoInfo)
     {
         var formats = videoInfo["formats"]?.AsArray();
         if (formats is null || formats.Count == 0)
@@ -64,81 +44,31 @@ public class FormatSelector
 
         LogAvailableFormats(formats);
 
-        // ── Tier 1/2: progressive (combined video+audio) ─────────────────────
-        // Prefer ≤1080p first; fall back to any height when nothing fits.
-        var progressive = PickBestProgressive(formats, maxHeight: 1080)
-                       ?? PickBestProgressive(formats, maxHeight: null);
+        // Tier 1: best progressive stream ≤1080p – highest resolution wins; MP4 preferred at equal resolution.
+        var best = PickBest(formats, maxHeight: 1080)
+            // Tier 2: any progressive stream – fallback when no ≤1080p progressive stream exists.
+            ?? PickBest(formats, maxHeight: null);
 
-        if (progressive is not null)
+        if (best is null)
         {
-            var url = progressive["url"]?.GetValue<string>();
-            if (!string.IsNullOrEmpty(url))
-            {
-                _logger.LogInformation(
-                    "Selected progressive format: id={FormatId} height={Height}p ext={Ext} tbr={Tbr} "
-                    + "(no muxing required)",
-                    GetString(progressive, "format_id"),
-                    GetInt(progressive, "height"),
-                    GetString(progressive, "ext"),
-                    GetDouble(progressive, "tbr"));
-
-                return new SelectedFormat(
-                    VideoUrl: url,
-                    VideoFormatId: GetString(progressive, "format_id"),
-                    Height: GetInt(progressive, "height"),
-                    Ext: GetString(progressive, "ext"));
-            }
+            _logger.LogInformation(
+                "No progressive format found. Only DASH or split streams are available.");
+            return null;
         }
 
+        var url = best["url"]?.GetValue<string>();
         _logger.LogInformation(
-            "No progressive stream found (YouTube only provides combined streams up to ~480p for most "
-            + "modern/long videos). Falling back to DASH video+audio pair.");
+            "Selected format: id={FormatId} height={Height}p ext={Ext} vcodec={VCodec} tbr={Tbr}",
+            GetString(best, "format_id"),
+            GetInt(best, "height"),
+            GetString(best, "ext"),
+            ShortenCodec(GetString(best, "vcodec")),
+            GetDouble(best, "tbr"));
 
-        // ── Tier 3/4: DASH video + audio (needs muxing) ──────────────────────
-        var (video, audio) = PickBestDash(formats, maxHeight: 1080);
-        if (video is null || audio is null)
-        {
-            (video, audio) = PickBestDash(formats, maxHeight: null);
-        }
-
-        if (video is not null && audio is not null)
-        {
-            var videoUrl = video["url"]?.GetValue<string>();
-            var audioUrl = audio["url"]?.GetValue<string>();
-
-            if (!string.IsNullOrEmpty(videoUrl) && !string.IsNullOrEmpty(audioUrl))
-            {
-                _logger.LogInformation(
-                    "Selected DASH pair: video id={VId} height={Height}p ext={VExt} vcodec={VCodec} tbr={VTbr} | "
-                    + "audio id={AId} ext={AExt} acodec={ACodec} abr={Abr} (will be muxed via yt-dlp+FFmpeg)",
-                    GetString(video, "format_id"),
-                    GetInt(video, "height"),
-                    GetString(video, "ext"),
-                    ShortenCodec(GetString(video, "vcodec")),
-                    GetDouble(video, "tbr"),
-                    GetString(audio, "format_id"),
-                    GetString(audio, "ext"),
-                    ShortenCodec(GetString(audio, "acodec")),
-                    GetDouble(audio, "abr"));
-
-                return new SelectedFormat(
-                    VideoUrl: videoUrl,
-                    VideoFormatId: GetString(video, "format_id"),
-                    Height: GetInt(video, "height"),
-                    Ext: GetString(video, "ext"),
-                    AudioUrl: audioUrl,
-                    AudioFormatId: GetString(audio, "format_id"));
-            }
-        }
-
-        _logger.LogWarning(
-            "No usable format found. Could not identify a compatible progressive or DASH stream pair.");
-        return null;
+        return url;
     }
 
-    // ── tier pickers ─────────────────────────────────────────────────────────
-
-    private static JsonNode? PickBestProgressive(JsonArray formats, int? maxHeight)
+    private static JsonNode? PickBest(JsonArray formats, int? maxHeight)
     {
         var query = formats
             .Where(f => f is not null)
@@ -155,46 +85,6 @@ public class FormatSelector
             .ThenByDescending(f => IsMp4(f) ? 1 : 0)
             .ThenByDescending(f => GetDouble(f, "tbr"))
             .FirstOrDefault();
-    }
-
-    private static (JsonNode? video, JsonNode? audio) PickBestDash(JsonArray formats, int? maxHeight)
-    {
-        // Video-only DASH: has vcodec set, acodec explicitly "none"
-        var videoQuery = formats
-            .Where(f => f is not null)
-            .Where(IsVideoOnlyDash);
-
-        if (maxHeight.HasValue)
-        {
-            var limit = maxHeight.Value;
-            // Exclude formats whose height is unknown (0) when applying a cap.
-            videoQuery = videoQuery.Where(f => GetInt(f, "height") > 0 && GetInt(f, "height") <= limit);
-        }
-
-        // Prefer H.264 (avc1) for widest Jellyfin/FFmpeg compatibility,
-        // then MP4 container, then highest total bitrate.
-        var bestVideo = videoQuery
-            .OrderByDescending(f => GetInt(f, "height"))
-            .ThenByDescending(f => IsAvc1(f) ? 1 : 0)
-            .ThenByDescending(f => IsMp4(f) ? 1 : 0)
-            .ThenByDescending(f => GetDouble(f, "tbr"))
-            .FirstOrDefault();
-
-        if (bestVideo is null)
-        {
-            return (null, null);
-        }
-
-        // Audio-only DASH: vcodec "none", acodec set
-        // Prefer AAC (mp4a) to match H.264 video; then highest audio bitrate.
-        var bestAudio = formats
-            .Where(f => f is not null)
-            .Where(IsAudioOnlyDash)
-            .OrderByDescending(f => IsM4a(f) ? 1 : 0)
-            .ThenByDescending(f => GetDouble(f, "abr"))
-            .FirstOrDefault();
-
-        return (bestVideo, bestAudio);
     }
 
     // ── logging ──────────────────────────────────────────────────────────────
@@ -238,44 +128,40 @@ public class FormatSelector
             + $"{progressive.Count} progressive, "
             + $"{dashVideo.Count} DASH-video, "
             + $"{dashAudio.Count} DASH-audio, "
-            + $"{other.Count} other):");
+            + $"{other.Count} other/storyboard):");
 
         if (progressive.Count > 0)
         {
-            sb.AppendLine("  Progressive (combined video+audio):");
+            sb.AppendLine("  Progressive (combined video+audio) – eligible for selection:");
             progressive.ForEach(l => sb.AppendLine($"    {l}"));
+        }
+        else
+        {
+            sb.AppendLine("  Progressive: none found.");
         }
 
         if (dashVideo.Count > 0)
         {
-            sb.AppendLine("  DASH video-only:");
+            sb.AppendLine("  DASH video-only (dropped – no audio):");
             dashVideo.ForEach(l => sb.AppendLine($"    {l}"));
         }
 
         if (dashAudio.Count > 0)
         {
-            sb.AppendLine("  DASH audio-only:");
+            sb.AppendLine("  DASH audio-only (dropped – no video):");
             dashAudio.ForEach(l => sb.AppendLine($"    {l}"));
-        }
-
-        if (other.Count > 0)
-        {
-            sb.AppendLine("  Other (storyboard/thumbnail/etc.):");
-            other.ForEach(l => sb.AppendLine($"    {l}"));
         }
 
         _logger.LogDebug("{FormatList}", sb.ToString().TrimEnd());
     }
 
-    private static string FormatSummary(JsonNode f)
-    {
-        return $"[{GetString(f, "format_id")}] "
-             + $"{GetInt(f, "height"),4}p "
-             + $"{GetString(f, "ext"),-4} "
-             + $"v={ShortenCodec(GetString(f, "vcodec")),-8} "
-             + $"a={ShortenCodec(GetString(f, "acodec")),-8} "
-             + $"tbr={GetDouble(f, "tbr"),7:F1}";
-    }
+    private static string FormatSummary(JsonNode f) =>
+        $"[{GetString(f, "format_id"),6}] "
+        + $"{GetInt(f, "height"),4}p "
+        + $"{GetString(f, "ext"),-4} "
+        + $"v={ShortenCodec(GetString(f, "vcodec")),-8} "
+        + $"a={ShortenCodec(GetString(f, "acodec")),-8} "
+        + $"tbr={GetDouble(f, "tbr"),8:F1}";
 
     // ── stream type predicates ────────────────────────────────────────────────
 
@@ -301,26 +187,20 @@ public class FormatSelector
         return vcodec == "none" && acodec != "none" && acodec.Length > 0;
     }
 
-    // ── format property helpers ───────────────────────────────────────────────
+    // ── helpers ──────────────────────────────────────────────────────────────
 
     private static bool IsMp4(JsonNode? f)
         => GetString(f, "ext") == "mp4";
 
-    private static bool IsM4a(JsonNode? f)
-        => GetString(f, "ext") == "m4a";
-
-    private static bool IsAvc1(JsonNode? f)
-        => GetString(f, "vcodec").StartsWith("avc1", StringComparison.OrdinalIgnoreCase);
-
     private static string ShortenCodec(string codec)
     {
-        if (codec.Length == 0)
+        if (codec.Length == 0 || codec == "none")
         {
-            return "(none)";
+            return codec;
         }
 
-        // e.g. "avc1.640028" → "avc1", "mp4a.40.2" → "mp4a"
-        var dot = codec.IndexOf('.', StringComparison.Ordinal);
+        // "avc1.640028" → "avc1",  "mp4a.40.2" → "mp4a"
+        var dot = codec.IndexOf('.');
         return dot < 0 ? codec : codec[..dot];
     }
 
@@ -336,6 +216,12 @@ public class FormatSelector
         }
     }
 
+    /// <summary>
+    /// Returns the integer value of a JSON numeric field.
+    /// Handles the case where yt-dlp emits heights as JSON floats (e.g. <c>720.0</c>)
+    /// which would otherwise cause <see cref="System.Text.Json.Nodes.JsonNode.GetValue{T}"/>
+    /// to throw and silently fall back to 0, corrupting the sort order.
+    /// </summary>
     private static int GetInt(JsonNode? node, string key)
     {
         if (node?[key] is not { } valueNode)
@@ -349,10 +235,11 @@ public class FormatSelector
         }
         catch (InvalidOperationException)
         {
-            // Value may be stored as double in some yt-dlp versions (e.g. 720.0).
+            // Some yt-dlp versions emit integer fields as JSON doubles (e.g. 720.0).
+            // Fall back to double → int conversion so height ordering is not corrupted.
             try
             {
-                return Convert.ToInt32(valueNode.GetValue<double>());
+                return (int)valueNode.GetValue<double>();
             }
             catch
             {
@@ -373,3 +260,4 @@ public class FormatSelector
         }
     }
 }
+
