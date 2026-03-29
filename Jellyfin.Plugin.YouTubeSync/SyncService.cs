@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -18,6 +19,8 @@ namespace Jellyfin.Plugin.YouTubeSync;
 /// </summary>
 public class SyncService
 {
+    private const int MaxPerSourceConcurrency = 4;
+
     private static readonly HttpClient HttpClient = new();
 
     private readonly YtDlpService _ytDlpService;
@@ -54,6 +57,9 @@ public class SyncService
     {
         var config = Plugin.Instance!.Configuration;
         var sourceInfo = await _ytDlpService.GetSourceInfoAsync(source.Url, cancellationToken).ConfigureAwait(false);
+        var retentionCutoffUtc = config.VideoRetentionDays > 0
+            ? DateTime.UtcNow.AddDays(-config.VideoRetentionDays)
+            : (DateTime?)null;
 
         var name = string.IsNullOrWhiteSpace(source.Name)
             ? sourceInfo?.Title ?? source.Id
@@ -74,44 +80,55 @@ public class SyncService
             .GetPlaylistEntriesAsync(source.Url, config.VideoRetentionDays, cancellationToken)
             .ConfigureAwait(false);
 
-        var videos = new List<VideoMetadata>();
-        foreach (var entry in entries)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
+        var videos = new ConcurrentBag<VideoMetadata>();
+        var desiredVideoDirectories = new ConcurrentDictionary<string, byte>(StringComparer.OrdinalIgnoreCase);
+        var desiredSeasonDirectories = new ConcurrentDictionary<string, byte>(StringComparer.OrdinalIgnoreCase);
 
-            var videoId = GetString(entry, "id");
-            if (string.IsNullOrWhiteSpace(videoId))
-            {
-                continue;
-            }
+        await Parallel.ForEachAsync(
+                entries,
+                new ParallelOptions
+                {
+                    CancellationToken = cancellationToken,
+                    MaxDegreeOfParallelism = MaxPerSourceConcurrency
+                },
+                async (entry, innerCancellationToken) =>
+                {
+                    var videoId = GetString(entry, "id");
+                    if (string.IsNullOrWhiteSpace(videoId))
+                    {
+                        return;
+                    }
 
-            var metadata = await _ytDlpService.GetVideoMetadataAsync(videoId, cancellationToken).ConfigureAwait(false)
-                ?? BuildFallbackVideoMetadata(entry, videoId, name);
+                    var metadata = await _ytDlpService.GetVideoMetadataAsync(videoId, innerCancellationToken).ConfigureAwait(false)
+                        ?? BuildFallbackVideoMetadata(entry, videoId, name);
 
-            if (string.IsNullOrWhiteSpace(metadata.VideoId))
-            {
-                metadata.VideoId = videoId;
-            }
+                    NormalizeVideoMetadata(metadata, entry, videoId, name);
 
-            if (string.IsNullOrWhiteSpace(metadata.Title))
-            {
-                metadata.Title = GetString(entry, "title");
-            }
+                    if (retentionCutoffUtc is DateTime cutoffUtc
+                        && metadata.PublishedUtc is DateTime publishedUtc
+                        && publishedUtc < cutoffUtc)
+                    {
+                        return;
+                    }
 
-            if (metadata.PublishedUtc is null)
-            {
-                metadata.PublishedUtc = ParseUploadDate(GetString(entry, "upload_date"));
-            }
+                    videos.Add(metadata);
 
-            if (config.VideoRetentionDays > 0
-                && metadata.PublishedUtc is DateTime publishedUtc
-                && publishedUtc < DateTime.UtcNow.AddDays(-config.VideoRetentionDays))
-            {
-                continue;
-            }
+                    var seasonFolder = GetSeasonFolderName(metadata.PublishedUtc, source.Mode);
+                    var parentDir = string.IsNullOrEmpty(seasonFolder)
+                        ? sourceDir
+                        : Path.Combine(sourceDir, seasonFolder);
+                    var videoDir = Path.Combine(parentDir, BuildVideoFolderName(metadata.Title, metadata.VideoId));
 
-            videos.Add(metadata);
-        }
+                    desiredVideoDirectories.TryAdd(videoDir, 0);
+                    if (!string.IsNullOrEmpty(seasonFolder))
+                    {
+                        desiredSeasonDirectories.TryAdd(parentDir, 0);
+                    }
+
+                    await WriteVideoShellAsync(metadata, videoDir, config.JellyfinBaseUrl, innerCancellationToken)
+                        .ConfigureAwait(false);
+                })
+            .ConfigureAwait(false);
 
         var retainedVideos = videos
             .OrderByDescending(v => v.PublishedUtc ?? DateTime.MinValue)
@@ -123,41 +140,64 @@ public class SyncService
             retainedVideos.Count,
             name);
 
-        var desiredVideoDirectories = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var desiredSeasonDirectories = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var seasonEpisodeCounters = BuildSeasonEpisodeCounters(retainedVideos, source.Mode);
 
-        foreach (var video in retainedVideos)
+        await Parallel.ForEachAsync(
+                retainedVideos,
+                new ParallelOptions
+                {
+                    CancellationToken = cancellationToken,
+                    MaxDegreeOfParallelism = MaxPerSourceConcurrency
+                },
+                async (video, innerCancellationToken) =>
+                {
+                    var seasonFolder = GetSeasonFolderName(video.PublishedUtc, source.Mode);
+                    var parentDir = string.IsNullOrEmpty(seasonFolder)
+                        ? sourceDir
+                        : Path.Combine(sourceDir, seasonFolder);
+                    var videoDir = Path.Combine(parentDir, BuildVideoFolderName(video.Title, video.VideoId));
+                    var seasonNumber = GetSeasonNumber(video.PublishedUtc, source.Mode);
+                    var episodeNumber = GetEpisodeNumber(video, seasonEpisodeCounters, source.Mode);
+
+                    await WriteVideoFilesAsync(
+                            video,
+                            source.Mode,
+                            seasonNumber,
+                            episodeNumber,
+                            videoDir,
+                            config.JellyfinBaseUrl,
+                            name,
+                            innerCancellationToken)
+                        .ConfigureAwait(false);
+                })
+            .ConfigureAwait(false);
+
+        CleanupObsoleteContent(
+            sourceDir,
+            source.Mode,
+            new HashSet<string>(desiredSeasonDirectories.Keys, StringComparer.OrdinalIgnoreCase),
+            new HashSet<string>(desiredVideoDirectories.Keys, StringComparer.OrdinalIgnoreCase));
+    }
+
+    private async Task WriteVideoShellAsync(
+        VideoMetadata video,
+        string videoDir,
+        string jellyfinBaseUrl,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(video.VideoId))
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            var seasonFolder = GetSeasonFolderName(video.PublishedUtc, source.Mode);
-            var parentDir = string.IsNullOrEmpty(seasonFolder)
-                ? sourceDir
-                : Path.Combine(sourceDir, seasonFolder);
-            var videoDir = Path.Combine(parentDir, BuildVideoFolderName(video.Title, video.VideoId));
-
-            desiredVideoDirectories.Add(videoDir);
-            if (!string.IsNullOrEmpty(seasonFolder))
-            {
-                desiredSeasonDirectories.Add(parentDir);
-            }
-
-            var seasonNumber = GetSeasonNumber(video.PublishedUtc, source.Mode);
-            var episodeNumber = GetEpisodeNumber(video, seasonEpisodeCounters, source.Mode);
-
-            await WriteVideoFilesAsync(
-                    video,
-                    source.Mode,
-                    seasonNumber,
-                    episodeNumber,
-                    videoDir,
-                    config.JellyfinBaseUrl,
-                    name,
-                    cancellationToken)
-                .ConfigureAwait(false);
+            return;
         }
 
-        CleanupObsoleteContent(sourceDir, source.Mode, desiredSeasonDirectories, desiredVideoDirectories);
+        var title = string.IsNullOrWhiteSpace(video.Title) ? video.VideoId : video.Title;
+        var safeName = SanitizeFileName(title);
+        Directory.CreateDirectory(videoDir);
+
+        var strmPath = Path.Combine(videoDir, $"{safeName}.strm");
+        var resolverUrl = $"{jellyfinBaseUrl.TrimEnd('/')}/YouTubeSync/resolve/{video.VideoId}";
+        await File.WriteAllTextAsync(strmPath, resolverUrl, Encoding.UTF8, cancellationToken)
+            .ConfigureAwait(false);
     }
 
     private async Task WriteVideoFilesAsync(
@@ -187,9 +227,7 @@ public class SyncService
         var strmPath = Path.Combine(videoDir, $"{safeName}.strm");
         var nfoPath = Path.Combine(videoDir, $"{safeName}.nfo");
 
-        var resolverUrl = $"{jellyfinBaseUrl.TrimEnd('/')}/YouTubeSync/resolve/{video.VideoId}";
-        await File.WriteAllTextAsync(strmPath, resolverUrl, Encoding.UTF8, cancellationToken)
-            .ConfigureAwait(false);
+        await WriteVideoShellAsync(video, videoDir, jellyfinBaseUrl, cancellationToken).ConfigureAwait(false);
         _logger.LogDebug("Wrote {StrmPath}", strmPath);
 
         var nfo = sourceMode == SourceMode.Movies
@@ -318,6 +356,34 @@ public class SyncService
             ChannelName = sourceName,
             PublishedUtc = ParseUploadDate(GetString(entry, "upload_date"))
         };
+    }
+
+    private static void NormalizeVideoMetadata(VideoMetadata metadata, JsonNode entry, string videoId, string sourceName)
+    {
+        if (string.IsNullOrWhiteSpace(metadata.VideoId))
+        {
+            metadata.VideoId = videoId;
+        }
+
+        if (string.IsNullOrWhiteSpace(metadata.Title))
+        {
+            metadata.Title = GetString(entry, "title");
+        }
+
+        if (string.IsNullOrWhiteSpace(metadata.Description))
+        {
+            metadata.Description = GetString(entry, "description");
+        }
+
+        if (string.IsNullOrWhiteSpace(metadata.ChannelName))
+        {
+            metadata.ChannelName = sourceName;
+        }
+
+        if (metadata.PublishedUtc is null)
+        {
+            metadata.PublishedUtc = ParseUploadDate(GetString(entry, "upload_date"));
+        }
     }
 
     private static DateTime? ParseUploadDate(string uploadDate)
