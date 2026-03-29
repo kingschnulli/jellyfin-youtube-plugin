@@ -15,8 +15,10 @@ namespace Jellyfin.Plugin.YouTubeSync;
 public sealed class ManagedTranscodeService : IDisposable
 {
     private const string PlaylistFileName = "index.m3u8";
+    private static readonly TimeSpan UnclaimedSessionTimeout = TimeSpan.FromSeconds(30);
 
     private readonly ConcurrentDictionary<string, ManagedTranscodeSession> _sessions = new(StringComparer.Ordinal);
+    private readonly SemaphoreSlim _sessionCreateGate = new(1, 1);
     private readonly YtDlpService _ytDlpService;
     private readonly ILogger<ManagedTranscodeService> _logger;
     private readonly Timer _cleanupTimer;
@@ -45,69 +47,86 @@ public sealed class ManagedTranscodeService : IDisposable
             return null;
         }
 
-        CleanupExpiredSessions();
-
-        var activeSessions = _sessions.Count(static pair => !pair.Value.Process.HasExited);
-        if (activeSessions >= Math.Max(1, config.MaxConcurrentManagedTranscodes))
-        {
-            _logger.LogWarning(
-                "Managed transcoding skipped for {VideoId}: active session limit {Limit} reached.",
-                videoId,
-                config.MaxConcurrentManagedTranscodes);
-            return null;
-        }
-
-        var input = await _ytDlpService.GetManagedPlaybackInputAsync(videoId, cancellationToken).ConfigureAwait(false);
-        if (input is null)
-        {
-            _logger.LogWarning("Managed transcoding skipped for {VideoId}: no suitable yt-dlp input URLs.", videoId);
-            return null;
-        }
-
-        var sessionId = Guid.NewGuid().ToString("N");
-        var sessionDirectory = Path.Combine(_rootDirectory, sessionId);
-        Directory.CreateDirectory(sessionDirectory);
-
-        var playlistPath = Path.Combine(sessionDirectory, PlaylistFileName);
-        var segmentPattern = Path.Combine(sessionDirectory, "segment_%03d.ts");
-        var process = CreateFfmpegProcess(config, input, playlistPath, segmentPattern);
-
+        await _sessionCreateGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            process.Start();
+            CleanupExpiredSessions();
+
+            var existingSessionPath = TryReuseExistingSession(videoId);
+            if (!string.IsNullOrWhiteSpace(existingSessionPath))
+            {
+                return existingSessionPath;
+            }
+
+            var activeSessions = _sessions.Count(static pair => !pair.Value.Process.HasExited);
+            if (activeSessions >= Math.Max(1, config.MaxConcurrentManagedTranscodes))
+            {
+                _logger.LogWarning(
+                    "Managed transcoding skipped for {VideoId}: active session limit {Limit} reached.",
+                    videoId,
+                    config.MaxConcurrentManagedTranscodes);
+                return null;
+            }
+
+            var input = await _ytDlpService.GetManagedPlaybackInputAsync(videoId, cancellationToken).ConfigureAwait(false);
+            if (input is null)
+            {
+                _logger.LogWarning("Managed transcoding skipped for {VideoId}: no suitable yt-dlp input URLs.", videoId);
+                return null;
+            }
+
+            var sessionId = Guid.NewGuid().ToString("N");
+            var sessionDirectory = Path.Combine(_rootDirectory, sessionId);
+            Directory.CreateDirectory(sessionDirectory);
+
+            var playlistPath = Path.Combine(sessionDirectory, PlaylistFileName);
+            var segmentPattern = Path.Combine(sessionDirectory, "segment_%03d.ts");
+            var process = CreateFfmpegProcess(config, input, playlistPath, segmentPattern);
+
+            try
+            {
+                process.Start();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to start ffmpeg managed transcoding session for {VideoId}", videoId);
+                TryDeleteDirectory(sessionDirectory);
+                process.Dispose();
+                return null;
+            }
+
+            var errorPump = PumpStandardErrorAsync(process, sessionId);
+            var session = new ManagedTranscodeSession
+            {
+                SessionId = sessionId,
+                VideoId = videoId,
+                DirectoryPath = sessionDirectory,
+                PlaylistPath = playlistPath,
+                Process = process,
+                ErrorPumpTask = errorPump,
+                CreatedUtc = DateTime.UtcNow,
+                LastAccessUtc = DateTime.UtcNow
+            };
+
+            process.Exited += (_, _) => RemoveAndDisposeSession(sessionId);
+
+            _sessions[sessionId] = session;
+
+            var becameReady = await WaitForReadyAsync(session, cancellationToken).ConfigureAwait(false);
+            if (!becameReady)
+            {
+                _logger.LogWarning("Managed transcoding session for {VideoId} failed before the first HLS segment was ready.", videoId);
+                RemoveAndDisposeSession(sessionId);
+                return null;
+            }
+
+            _logger.LogInformation("Managed transcoding session {SessionId} is ready for video {VideoId}", sessionId, videoId);
+            return BuildSessionPath(sessionId);
         }
-        catch (Exception ex)
+        finally
         {
-            _logger.LogError(ex, "Failed to start ffmpeg managed transcoding session for {VideoId}", videoId);
-            TryDeleteDirectory(sessionDirectory);
-            process.Dispose();
-            return null;
+            _sessionCreateGate.Release();
         }
-
-        var errorPump = PumpStandardErrorAsync(process, sessionId);
-        var session = new ManagedTranscodeSession
-        {
-            SessionId = sessionId,
-            VideoId = videoId,
-            DirectoryPath = sessionDirectory,
-            PlaylistPath = playlistPath,
-            Process = process,
-            ErrorPumpTask = errorPump,
-            LastAccessUtc = DateTime.UtcNow
-        };
-
-        _sessions[sessionId] = session;
-
-        var becameReady = await WaitForReadyAsync(session, cancellationToken).ConfigureAwait(false);
-        if (!becameReady)
-        {
-            _logger.LogWarning("Managed transcoding session for {VideoId} failed before the first HLS segment was ready.", videoId);
-            RemoveAndDisposeSession(sessionId);
-            return null;
-        }
-
-        _logger.LogInformation("Managed transcoding session {SessionId} is ready for video {VideoId}", sessionId, videoId);
-        return $"/YouTubeSync/session/{sessionId}/{PlaylistFileName}";
     }
 
     /// <summary>
@@ -128,6 +147,7 @@ public sealed class ManagedTranscodeService : IDisposable
             return false;
         }
 
+        session.HasClientAccess = true;
         session.LastAccessUtc = DateTime.UtcNow;
 
         var candidatePath = Path.GetFullPath(Path.Combine(session.DirectoryPath, fileName));
@@ -155,6 +175,43 @@ public sealed class ManagedTranscodeService : IDisposable
         }
 
         return "application/octet-stream";
+    }
+
+    private string? TryReuseExistingSession(string videoId)
+    {
+        foreach (var pair in _sessions)
+        {
+            var session = pair.Value;
+            if (!string.Equals(session.VideoId, videoId, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (session.Process.HasExited)
+            {
+                RemoveAndDisposeSession(pair.Key);
+                continue;
+            }
+
+            if (!File.Exists(session.PlaylistPath))
+            {
+                continue;
+            }
+
+            session.LastAccessUtc = DateTime.UtcNow;
+            _logger.LogInformation(
+                "Reusing managed transcoding session {SessionId} for video {VideoId}",
+                session.SessionId,
+                videoId);
+            return BuildSessionPath(session.SessionId);
+        }
+
+        return null;
+    }
+
+    private static string BuildSessionPath(string sessionId)
+    {
+        return $"/YouTubeSync/session/{sessionId}/{PlaylistFileName}";
     }
 
     private Process CreateFfmpegProcess(
@@ -375,15 +432,36 @@ public sealed class ManagedTranscodeService : IDisposable
     {
         var idleMinutes = Math.Max(1, Plugin.Instance?.Configuration.ManagedTranscodeSessionIdleMinutes ?? 2);
         var cutoff = DateTime.UtcNow.AddMinutes(-idleMinutes);
+        var unclaimedCutoff = DateTime.UtcNow - UnclaimedSessionTimeout;
 
         foreach (var pair in _sessions)
         {
             var session = pair.Value;
-            if (session.LastAccessUtc > cutoff && !session.Process.HasExited)
+            if (session.Process.HasExited)
+            {
+                RemoveAndDisposeSession(pair.Key);
+                continue;
+            }
+
+            if (!session.HasClientAccess && session.CreatedUtc <= unclaimedCutoff)
+            {
+                _logger.LogInformation(
+                    "Stopping unclaimed managed transcoding session {SessionId} for video {VideoId} after startup timeout.",
+                    session.SessionId,
+                    session.VideoId);
+                RemoveAndDisposeSession(pair.Key);
+                continue;
+            }
+
+            if (session.LastAccessUtc > cutoff)
             {
                 continue;
             }
 
+            _logger.LogInformation(
+                "Stopping idle managed transcoding session {SessionId} for video {VideoId} after inactivity timeout.",
+                session.SessionId,
+                session.VideoId);
             RemoveAndDisposeSession(pair.Key);
         }
     }
@@ -438,6 +516,7 @@ public sealed class ManagedTranscodeService : IDisposable
         }
 
         _disposed = true;
+    _sessionCreateGate.Dispose();
         _cleanupTimer.Dispose();
 
         foreach (var sessionId in _sessions.Keys.ToArray())
