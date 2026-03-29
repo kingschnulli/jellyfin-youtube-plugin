@@ -11,14 +11,12 @@ via **yt-dlp**, without pre-downloading any content.
    - `<VideoTitle>.strm` – points to the built-in resolver endpoint
    - `<VideoTitle>.nfo` – episode metadata from yt-dlp's flat-playlist output
 
-2. **Resolver endpoint** – `GET /YouTubeSync/resolve/{videoId}`  
-   Calls `yt-dlp --get-url` with the configured playback target, caches the returned playback
-   URL for a configurable number of minutes, and returns an **HTTP 302** redirect. The resolved
-   URL may be a direct media URL or a manifest URL that Jellyfin can open itself.
+2. **Simple playback** – the plugin asks `yt-dlp` for a playable YouTube URL, caches it briefly,
+   and hands it to Jellyfin. This is the lightest setup and works without `ffmpeg`.
 
-3. **Managed transcoding mode (optional)** – when enabled, the resolver first tries to build
-   a disk-backed local HLS session using `ffmpeg` and higher-quality YouTube inputs. If session
-   startup fails for any reason, the plugin falls back to the standard redirect-only resolver.
+3. **Enhanced playback (optional)** – when enabled, the plugin first tries to create a cleaner,
+   disk-backed local HLS stream using `ffmpeg` and higher-quality YouTube inputs. If that cannot
+   start for any reason, playback automatically falls back to Simple playback.
 
 ## Requirements
 
@@ -92,27 +90,28 @@ managed through the UI — no manual file editing is required.
 | Library base path | `/media/youtube` | Root folder inside a Jellyfin library where .strm/.nfo files are written |
 | Jellyfin base URL | `http://localhost:8096` | Externally accessible Jellyfin URL written into `.strm` resolver links — **set this to your public URL** when clients access Jellyfin remotely |
 | CDN URL cache duration | `5` min | How long a resolved CDN URL is cached in memory before being re-fetched |
-| Playback target | `Broad compatibility` | Chooses whether yt-dlp should prefer a safer 720p MP4, a balanced 1080p target, or maximum available quality |
+| Fallback playback preference | `Compatibility first` | Used by Simple playback and as a fallback when Enhanced playback is unavailable |
 | Max videos per source | `200` | Maximum number of videos to sync per channel or playlist (0 = unlimited) |
-| Managed transcoding | `Disabled` | Opt-in ffmpeg-backed playback path that tries to generate a local HLS session before falling back to direct redirect |
-| ffmpeg executable path | `ffmpeg` | Path to the ffmpeg binary used for managed transcoding |
-| Hardware acceleration | `Software` | Encoder used for managed sessions (`Software`, `QSV`, `NVENC`, `VAAPI`, `AMF`) |
-| Managed session idle minutes | `2` | Idle timeout before a managed ffmpeg session is stopped and deleted |
-| Max concurrent managed sessions | `2` | New playback requests fall back to the lightweight direct path once this limit is reached |
+| Playback mode | `Simple mode` | `Simple mode` works without ffmpeg. `Enhanced mode` creates a local ffmpeg-backed stream first and falls back automatically if needed |
+| ffmpeg path | `ffmpeg` | Path to the ffmpeg binary used by Enhanced mode |
+| Video encoder | `Software` | Encoder used by Enhanced mode (`Software`, `Intel Quick Sync`, `NVIDIA NVENC`, `VAAPI`, `AMD AMF`) |
+| Stop unused enhanced streams after | `2` min | Idle timeout before an Enhanced mode stream is stopped and deleted |
+| Concurrent enhanced streams | `2` | Maximum number of Enhanced mode playbacks before new requests fall back to Simple mode |
 
-### Playback target guidance
+### Fallback playback preference
 
 | Target | Behavior |
 |---|---|
-| Broad compatibility (prefer 720p MP4) | Best default for mixed clients. Prefers a plain 720p MP4 stream when available, which avoids fragile HLS remux paths on some Jellyfin clients. |
-| Balanced (allow up to 1080p) | Good fit when desktop and native clients matter more than edge-case compatibility. May resolve manifest-based playback URLs. |
-| Maximum quality | Lets yt-dlp choose the best combined stream it can expose. Highest quality, lowest predictability across clients. |
+| Compatibility first | Best default for mixed clients. Prefers simpler streams that are more likely to play cleanly everywhere. |
+| Balanced | Aims for a good middle ground between compatibility and quality. |
+| Highest single-stream quality | Asks YouTube for the best single playable stream it can provide. Highest quality, lowest predictability. |
 
-### Managed transcoding guidance
+### Playback mode guidance
 
-- Leave managed transcoding disabled if you want the original lightweight v1 behavior.
-- Managed transcoding is designed as a best-effort enhancement. If ffmpeg or the selected hardware encoder cannot start, the plugin falls back to the direct redirect path automatically.
-- The initial managed profile normalizes playback to a local HLS stream using H.264 video and AAC audio for broader client compatibility.
+- Use Simple mode if you want the lightest setup and do not want to depend on ffmpeg.
+- Use Enhanced mode if you want sharper, more consistent playback on devices that benefit from a locally generated stream.
+- Enhanced mode is best-effort. If ffmpeg or the selected encoder cannot start, playback automatically falls back to Simple mode.
+- The first Enhanced mode profile normalizes playback to a local HLS stream using H.264 video and AAC audio for broad compatibility.
 
 ### Adding a source (channel or playlist)
 

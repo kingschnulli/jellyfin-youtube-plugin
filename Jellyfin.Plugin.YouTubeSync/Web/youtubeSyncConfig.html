@@ -33,12 +33,12 @@
                 </div>
 
                 <div class="inputContainer">
-                    <select is="emby-select" id="PlaybackTarget" label="Playback target">
-                        <option value="BroadCompatibility720p">Broad compatibility (prefer 720p MP4)</option>
-                        <option value="Balanced1080p">Balanced (allow up to 1080p)</option>
-                        <option value="MaximumQuality">Maximum quality</option>
+                    <select is="emby-select" id="PlaybackTarget" label="Fallback playback preference">
+                        <option value="BroadCompatibility720p">Compatibility first</option>
+                        <option value="Balanced1080p">Balanced</option>
+                        <option value="MaximumQuality">Highest single-stream quality</option>
                     </select>
-                    <div class="fieldDescription">Choose the playback target yt-dlp should prefer. Broad compatibility tries to avoid HLS-only streams when a 720p MP4 exists.</div>
+                    <div class="fieldDescription">Used when Enhanced playback is disabled or unavailable. Compatibility first prefers simpler 720p-friendly streams, Balanced aims for a good middle ground, and Highest single-stream quality asks YouTube for the best single stream it can provide.</div>
                 </div>
 
                 <div class="inputContainer">
@@ -48,40 +48,40 @@
             </div>
 
             <div class="verticalSection">
-                <h3 class="sectionTitle">Managed Transcoding</h3>
+                <h3 class="sectionTitle">Enhanced Playback</h3>
 
                 <div class="inputContainer">
-                    <select is="emby-select" id="AllowManagedTranscoding" label="Managed transcoding">
-                        <option value="false">Disabled (keep lightweight direct redirect path)</option>
-                        <option value="true">Enabled (try ffmpeg HLS session first, then fall back)</option>
+                    <select is="emby-select" id="AllowManagedTranscoding" label="Playback mode">
+                        <option value="false">Simple mode</option>
+                        <option value="true">Enhanced mode</option>
                     </select>
-                    <div class="fieldDescription">Off by default. When enabled, the plugin tries to build a local ffmpeg-backed HLS session for sharper playback and falls back to the current redirect-only path on failure.</div>
+                    <div class="fieldDescription">Simple mode keeps setup light and works without ffmpeg. Enhanced mode uses ffmpeg to create a cleaner, more compatible playback stream and automatically falls back to Simple mode if it cannot start.</div>
                 </div>
 
                 <div class="inputContainer">
-                    <input is="emby-input" type="text" id="FfmpegPath" label="ffmpeg executable path" />
-                    <div class="fieldDescription">Path to the ffmpeg binary used for managed transcoding. Use <code>ffmpeg</code> if it is available on PATH.</div>
+                    <input is="emby-input" type="text" id="FfmpegPath" label="ffmpeg path" />
+                    <div class="fieldDescription">Path to the ffmpeg binary used by Enhanced mode. Use <code>ffmpeg</code> if it is available on PATH.</div>
                 </div>
 
                 <div class="inputContainer">
-                    <select is="emby-select" id="ManagedTranscodeHardwareMode" label="Hardware acceleration">
-                        <option value="None">Software (libx264)</option>
-                        <option value="Qsv">Intel QSV</option>
+                    <select is="emby-select" id="ManagedTranscodeHardwareMode" label="Video encoder">
+                        <option value="None">Software</option>
+                        <option value="Qsv">Intel Quick Sync</option>
                         <option value="Nvenc">NVIDIA NVENC</option>
                         <option value="Vaapi">VAAPI</option>
                         <option value="Amf">AMD AMF</option>
                     </select>
-                    <div class="fieldDescription">Choose the encoder used for managed sessions. Start with software if you are unsure, then switch to the hardware encoder your server already uses successfully.</div>
+                    <div class="fieldDescription">Choose how Enhanced mode encodes video. Start with Software if you are unsure, then switch to the hardware encoder that already works well on your server.</div>
                 </div>
 
                 <div class="inputContainer">
-                    <input is="emby-input" type="number" id="ManagedTranscodeSessionIdleMinutes" label="Managed session idle minutes" min="1" max="30" />
-                    <div class="fieldDescription">Idle managed sessions are stopped and deleted automatically after this many minutes.</div>
+                    <input is="emby-input" type="number" id="ManagedTranscodeSessionIdleMinutes" label="Stop unused enhanced streams after (minutes)" min="1" max="30" />
+                    <div class="fieldDescription">Unused Enhanced mode streams are stopped and cleaned up automatically after this many minutes.</div>
                 </div>
 
                 <div class="inputContainer">
-                    <input is="emby-input" type="number" id="MaxConcurrentManagedTranscodes" label="Max concurrent managed sessions" min="1" max="10" />
-                    <div class="fieldDescription">When the limit is reached, the plugin falls back to the direct lightweight path for new playbacks.</div>
+                    <input is="emby-input" type="number" id="MaxConcurrentManagedTranscodes" label="Concurrent enhanced streams" min="1" max="10" />
+                    <div class="fieldDescription">Maximum number of Enhanced mode playbacks at the same time. Extra playbacks automatically fall back to Simple mode.</div>
                 </div>
             </div>
 
