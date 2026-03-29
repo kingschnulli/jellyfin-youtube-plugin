@@ -1,5 +1,8 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
+using System.Linq;
+using System.Net.Http;
 using System.Text;
 using System.Text.Json.Nodes;
 using System.Threading;
@@ -15,6 +18,8 @@ namespace Jellyfin.Plugin.YouTubeSync;
 /// </summary>
 public class SyncService
 {
+    private static readonly HttpClient HttpClient = new();
+
     private readonly YtDlpService _ytDlpService;
     private readonly ILogger<SyncService> _logger;
 
@@ -48,126 +53,175 @@ public class SyncService
     private async Task SyncSourceAsync(SourceDefinition source, CancellationToken cancellationToken)
     {
         var config = Plugin.Instance!.Configuration;
+        var sourceInfo = await _ytDlpService.GetSourceInfoAsync(source.Url, cancellationToken).ConfigureAwait(false);
 
-        // Auto-resolve display name / description / thumbnail from YouTube when not manually set.
-        var name = source.Name;
-        var description = source.Description;
-        var thumbnailUrl = source.ThumbnailUrl;
-
-        if (string.IsNullOrEmpty(name))
-        {
-            _logger.LogInformation(
-                "No display name configured for source '{Id}'; fetching metadata from YouTube.",
-                source.Id);
-
-            var info = await _ytDlpService.GetSourceInfoAsync(source.Url, cancellationToken)
-                .ConfigureAwait(false);
-
-            if (info is not null)
-            {
-                name = string.IsNullOrEmpty(info.Title) ? source.Id : info.Title;
-                if (string.IsNullOrEmpty(description))
-                {
-                    description = info.Description;
-                }
-
-                if (string.IsNullOrEmpty(thumbnailUrl))
-                {
-                    thumbnailUrl = info.ThumbnailUrl;
-                }
-            }
-            else
-            {
-                name = source.Id;
-            }
-        }
+        var name = string.IsNullOrWhiteSpace(source.Name)
+            ? sourceInfo?.Title ?? source.Id
+            : source.Name;
+        var description = string.IsNullOrWhiteSpace(source.Description)
+            ? sourceInfo?.Description ?? string.Empty
+            : source.Description;
+        var thumbnailUrl = string.IsNullOrWhiteSpace(source.ThumbnailUrl)
+            ? sourceInfo?.ThumbnailUrl ?? string.Empty
+            : source.ThumbnailUrl;
 
         var sourceDir = Path.Combine(config.LibraryBasePath, SanitizeFileName(name));
 
         Directory.CreateDirectory(sourceDir);
-        WriteSourceNfo(source, sourceDir, name, description, thumbnailUrl);
+        await WriteSourceMetadataAsync(source, sourceDir, name, description, thumbnailUrl, cancellationToken).ConfigureAwait(false);
 
         var entries = await _ytDlpService
-            .GetPlaylistEntriesAsync(source.Url, config.MaxVideosPerSource, cancellationToken)
+            .GetPlaylistEntriesAsync(source.Url, config.VideoRetentionDays, cancellationToken)
             .ConfigureAwait(false);
 
-        _logger.LogInformation(
-            "Syncing {Count} video(s) for source '{Name}'",
-            entries.Count,
-            name);
-
+        var videos = new List<VideoMetadata>();
         foreach (var entry in entries)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            await WriteVideoFilesAsync(entry, sourceDir, config.JellyfinBaseUrl, cancellationToken)
+
+            var videoId = GetString(entry, "id");
+            if (string.IsNullOrWhiteSpace(videoId))
+            {
+                continue;
+            }
+
+            var metadata = await _ytDlpService.GetVideoMetadataAsync(videoId, cancellationToken).ConfigureAwait(false)
+                ?? BuildFallbackVideoMetadata(entry, videoId, name);
+
+            if (string.IsNullOrWhiteSpace(metadata.VideoId))
+            {
+                metadata.VideoId = videoId;
+            }
+
+            if (string.IsNullOrWhiteSpace(metadata.Title))
+            {
+                metadata.Title = GetString(entry, "title");
+            }
+
+            if (metadata.PublishedUtc is null)
+            {
+                metadata.PublishedUtc = ParseUploadDate(GetString(entry, "upload_date"));
+            }
+
+            if (config.VideoRetentionDays > 0
+                && metadata.PublishedUtc is DateTime publishedUtc
+                && publishedUtc < DateTime.UtcNow.AddDays(-config.VideoRetentionDays))
+            {
+                continue;
+            }
+
+            videos.Add(metadata);
+        }
+
+        var retainedVideos = videos
+            .OrderByDescending(v => v.PublishedUtc ?? DateTime.MinValue)
+            .ThenBy(v => v.Title, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        _logger.LogInformation(
+            "Syncing {Count} video(s) for source '{Name}'",
+            retainedVideos.Count,
+            name);
+
+        var desiredVideoDirectories = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var desiredSeasonDirectories = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var seasonEpisodeCounters = BuildSeasonEpisodeCounters(retainedVideos, source.Mode);
+
+        foreach (var video in retainedVideos)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var seasonFolder = GetSeasonFolderName(video.PublishedUtc, source.Mode);
+            var parentDir = string.IsNullOrEmpty(seasonFolder)
+                ? sourceDir
+                : Path.Combine(sourceDir, seasonFolder);
+            var videoDir = Path.Combine(parentDir, BuildVideoFolderName(video.Title, video.VideoId));
+
+            desiredVideoDirectories.Add(videoDir);
+            if (!string.IsNullOrEmpty(seasonFolder))
+            {
+                desiredSeasonDirectories.Add(parentDir);
+            }
+
+            var seasonNumber = GetSeasonNumber(video.PublishedUtc, source.Mode);
+            var episodeNumber = GetEpisodeNumber(video, seasonEpisodeCounters, source.Mode);
+
+            await WriteVideoFilesAsync(
+                    video,
+                    source.Mode,
+                    seasonNumber,
+                    episodeNumber,
+                    videoDir,
+                    config.JellyfinBaseUrl,
+                    name,
+                    cancellationToken)
                 .ConfigureAwait(false);
         }
+
+        CleanupObsoleteContent(sourceDir, source.Mode, desiredSeasonDirectories, desiredVideoDirectories);
     }
 
     private async Task WriteVideoFilesAsync(
-        JsonNode entry,
-        string sourceDir,
+        VideoMetadata video,
+        SourceMode sourceMode,
+        int? seasonNumber,
+        int? episodeNumber,
+        string videoDir,
         string jellyfinBaseUrl,
+        string sourceName,
         CancellationToken cancellationToken)
     {
-        var videoId = GetString(entry, "id");
-        if (string.IsNullOrEmpty(videoId))
+        if (string.IsNullOrEmpty(video.VideoId))
         {
             return;
         }
 
-        var title = GetString(entry, "title");
+        var title = video.Title;
         if (string.IsNullOrEmpty(title))
         {
-            title = videoId;
+            title = video.VideoId;
         }
 
-        var description = GetString(entry, "description");
-        var uploadDate = GetString(entry, "upload_date");
         var safeName = SanitizeFileName(title);
+        Directory.CreateDirectory(videoDir);
 
-        var strmPath = Path.Combine(sourceDir, $"{safeName}.strm");
-        var nfoPath = Path.Combine(sourceDir, $"{safeName}.nfo");
+        var strmPath = Path.Combine(videoDir, $"{safeName}.strm");
+        var nfoPath = Path.Combine(videoDir, $"{safeName}.nfo");
 
-        if (!File.Exists(strmPath))
-        {
-            var resolverUrl = $"{jellyfinBaseUrl.TrimEnd('/')}/YouTubeSync/resolve/{videoId}";
-            await File.WriteAllTextAsync(strmPath, resolverUrl, Encoding.UTF8, cancellationToken)
-                .ConfigureAwait(false);
-            _logger.LogDebug("Created {StrmPath}", strmPath);
-        }
+        var resolverUrl = $"{jellyfinBaseUrl.TrimEnd('/')}/YouTubeSync/resolve/{video.VideoId}";
+        await File.WriteAllTextAsync(strmPath, resolverUrl, Encoding.UTF8, cancellationToken)
+            .ConfigureAwait(false);
+        _logger.LogDebug("Wrote {StrmPath}", strmPath);
 
-        if (!File.Exists(nfoPath))
-        {
-            var nfo = BuildVideoNfo(title, description, videoId, uploadDate);
-            await File.WriteAllTextAsync(nfoPath, nfo, Encoding.UTF8, cancellationToken)
-                .ConfigureAwait(false);
-        }
+        var nfo = sourceMode == SourceMode.Movies
+            ? BuildMovieVideoNfo(video, sourceName)
+            : BuildEpisodeNfo(video, sourceName, seasonNumber, episodeNumber);
+        await File.WriteAllTextAsync(nfoPath, nfo, Encoding.UTF8, cancellationToken)
+            .ConfigureAwait(false);
+
+        await DownloadArtworkAsync(video.ThumbnailUrl, videoDir, new[] { "folder", "poster" }, cancellationToken)
+            .ConfigureAwait(false);
     }
 
     // ── NFO builders ──────────────────────────────────────────────────────────
 
-    private static void WriteSourceNfo(
+    private async Task WriteSourceMetadataAsync(
         SourceDefinition source,
         string dir,
         string name,
         string description,
-        string thumbnailUrl)
+        string thumbnailUrl,
+        CancellationToken cancellationToken)
     {
         bool isSeries = source.Type == SourceType.Channel || source.Mode == SourceMode.Series;
         var nfoFileName = isSeries ? "tvshow.nfo" : "movie.nfo";
         var nfoPath = Path.Combine(dir, nfoFileName);
 
-        if (File.Exists(nfoPath))
-        {
-            return;
-        }
-
         var content = isSeries
             ? BuildTvShowNfo(source, name, description, thumbnailUrl)
             : BuildCollectionNfo(source, name, description, thumbnailUrl);
 
-        File.WriteAllText(nfoPath, content, Encoding.UTF8);
+        await File.WriteAllTextAsync(nfoPath, content, Encoding.UTF8, cancellationToken).ConfigureAwait(false);
+        await DownloadArtworkAsync(thumbnailUrl, dir, new[] { "folder", "poster" }, cancellationToken).ConfigureAwait(false);
     }
 
     private static string BuildTvShowNfo(SourceDefinition source, string name, string description, string thumbnailUrl)
@@ -202,21 +256,46 @@ public class SyncService
         """;
     }
 
-    private static string BuildVideoNfo(string title, string description, string videoId, string uploadDate)
+    private static string BuildEpisodeNfo(VideoMetadata video, string sourceName, int? seasonNumber, int? episodeNumber)
     {
-        var aired = string.Empty;
-        if (uploadDate.Length == 8)
-        {
-            aired = $"\n  <aired>{uploadDate[..4]}-{uploadDate[4..6]}-{uploadDate[6..]}</aired>";
-        }
+        var aired = BuildDateTag("aired", video.PublishedUtc);
+        var premiered = BuildDateTag("premiered", video.PublishedUtc);
+        var thumb = string.IsNullOrEmpty(video.ThumbnailUrl)
+            ? string.Empty
+            : $"\n  <thumb>{Xml(video.ThumbnailUrl)}</thumb>";
+        var season = seasonNumber.HasValue ? $"\n  <season>{seasonNumber.Value}</season>" : string.Empty;
+        var episode = episodeNumber.HasValue ? $"\n  <episode>{episodeNumber.Value}</episode>" : string.Empty;
+        var runtime = video.DurationSeconds.HasValue ? $"\n  <runtime>{video.DurationSeconds.Value / 60}</runtime>" : string.Empty;
+        var studio = string.IsNullOrWhiteSpace(video.ChannelName) ? string.Empty : $"\n  <studio>{Xml(video.ChannelName)}</studio>";
 
         return $"""
         <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
         <episodedetails>
-          <title>{Xml(title)}</title>
-          <plot>{Xml(description)}</plot>
-          <uniqueid type="youtube" default="true">{Xml(videoId)}</uniqueid>{aired}
+          <title>{Xml(video.Title)}</title>
+          <showtitle>{Xml(sourceName)}</showtitle>
+          <plot>{Xml(video.Description)}</plot>
+          <uniqueid type="youtube" default="true">{Xml(video.VideoId)}</uniqueid>{aired}{premiered}{season}{episode}{runtime}{studio}{thumb}
         </episodedetails>
+        """;
+    }
+
+    private static string BuildMovieVideoNfo(VideoMetadata video, string sourceName)
+    {
+        var premiered = BuildDateTag("premiered", video.PublishedUtc);
+        var thumb = string.IsNullOrEmpty(video.ThumbnailUrl)
+            ? string.Empty
+            : $"\n  <thumb>{Xml(video.ThumbnailUrl)}</thumb>";
+        var runtime = video.DurationSeconds.HasValue ? $"\n  <runtime>{video.DurationSeconds.Value / 60}</runtime>" : string.Empty;
+        var studio = string.IsNullOrWhiteSpace(video.ChannelName) ? string.Empty : $"\n  <studio>{Xml(video.ChannelName)}</studio>";
+        var set = string.IsNullOrWhiteSpace(sourceName) ? string.Empty : $"\n  <set>{Xml(sourceName)}</set>";
+
+        return $"""
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <movie>
+          <title>{Xml(video.Title)}</title>
+          <plot>{Xml(video.Description)}</plot>
+          <uniqueid type="youtube" default="true">{Xml(video.VideoId)}</uniqueid>{premiered}{runtime}{studio}{set}{thumb}
+        </movie>
         """;
     }
 
@@ -226,6 +305,251 @@ public class SyncService
     {
         try { return node?[key]?.GetValue<string>() ?? string.Empty; }
         catch { return string.Empty; }
+    }
+
+    private static VideoMetadata BuildFallbackVideoMetadata(JsonNode entry, string videoId, string sourceName)
+    {
+        return new VideoMetadata
+        {
+            VideoId = videoId,
+            Title = GetString(entry, "title"),
+            Description = GetString(entry, "description"),
+            ThumbnailUrl = GetString(entry, "thumbnail"),
+            ChannelName = sourceName,
+            PublishedUtc = ParseUploadDate(GetString(entry, "upload_date"))
+        };
+    }
+
+    private static DateTime? ParseUploadDate(string uploadDate)
+    {
+        if (uploadDate.Length == 8
+            && DateTime.TryParseExact(
+                uploadDate,
+                "yyyyMMdd",
+                System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal,
+                out var parsedDate))
+        {
+            return parsedDate;
+        }
+
+        return null;
+    }
+
+    private static Dictionary<int, Dictionary<string, int>> BuildSeasonEpisodeCounters(
+        IReadOnlyList<VideoMetadata> videos,
+        SourceMode sourceMode)
+    {
+        var counters = new Dictionary<int, Dictionary<string, int>>();
+        if (sourceMode == SourceMode.Movies)
+        {
+            return counters;
+        }
+
+        foreach (var seasonGroup in videos
+                     .GroupBy(video => GetSeasonNumber(video.PublishedUtc, sourceMode) ?? 0)
+                     .OrderBy(group => group.Key))
+        {
+            var seasonEpisodes = new Dictionary<string, int>(StringComparer.Ordinal);
+            var ordered = seasonGroup
+                .OrderBy(video => video.PublishedUtc ?? DateTime.MinValue)
+                .ThenBy(video => video.Title, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            for (var index = 0; index < ordered.Count; index++)
+            {
+                seasonEpisodes[ordered[index].VideoId] = index + 1;
+            }
+
+            counters[seasonGroup.Key] = seasonEpisodes;
+        }
+
+        return counters;
+    }
+
+    private static int? GetEpisodeNumber(
+        VideoMetadata video,
+        IReadOnlyDictionary<int, Dictionary<string, int>> seasonEpisodeCounters,
+        SourceMode sourceMode)
+    {
+        if (sourceMode == SourceMode.Movies)
+        {
+            return null;
+        }
+
+        var seasonNumber = GetSeasonNumber(video.PublishedUtc, sourceMode) ?? 0;
+        return seasonEpisodeCounters.TryGetValue(seasonNumber, out var seasonMap)
+            && seasonMap.TryGetValue(video.VideoId, out var episode)
+            ? episode
+            : null;
+    }
+
+    private static int? GetSeasonNumber(DateTime? publishedUtc, SourceMode sourceMode)
+    {
+        if (sourceMode == SourceMode.Movies)
+        {
+            return null;
+        }
+
+        return publishedUtc?.Year ?? 0;
+    }
+
+    private static string GetSeasonFolderName(DateTime? publishedUtc, SourceMode sourceMode)
+    {
+        if (sourceMode == SourceMode.Movies)
+        {
+            return string.Empty;
+        }
+
+        return publishedUtc is DateTime date ? $"Season {date.Year}" : "Season 0";
+    }
+
+    private static string BuildVideoFolderName(string title, string videoId)
+    {
+        var safeTitle = SanitizeFileName(string.IsNullOrWhiteSpace(title) ? videoId : title);
+        return $"{safeTitle} [{videoId}]";
+    }
+
+    private void CleanupObsoleteContent(
+        string sourceDir,
+        SourceMode sourceMode,
+        HashSet<string> desiredSeasonDirectories,
+        HashSet<string> desiredVideoDirectories)
+    {
+        DeleteLegacyRootVideoFiles(sourceDir);
+
+        if (sourceMode == SourceMode.Movies)
+        {
+            foreach (var directory in Directory.EnumerateDirectories(sourceDir))
+            {
+                if (!desiredVideoDirectories.Contains(directory))
+                {
+                    TryDeleteDirectory(directory);
+                }
+            }
+
+            return;
+        }
+
+        foreach (var seasonDirectory in Directory.EnumerateDirectories(sourceDir))
+        {
+            if (!Path.GetFileName(seasonDirectory).StartsWith("Season ", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (!desiredSeasonDirectories.Contains(seasonDirectory))
+            {
+                TryDeleteDirectory(seasonDirectory);
+                continue;
+            }
+
+            foreach (var videoDirectory in Directory.EnumerateDirectories(seasonDirectory))
+            {
+                if (!desiredVideoDirectories.Contains(videoDirectory))
+                {
+                    TryDeleteDirectory(videoDirectory);
+                }
+            }
+        }
+    }
+
+    private static void DeleteLegacyRootVideoFiles(string sourceDir)
+    {
+        foreach (var filePath in Directory.EnumerateFiles(sourceDir))
+        {
+            var fileName = Path.GetFileName(filePath);
+            if (fileName.Equals("tvshow.nfo", StringComparison.OrdinalIgnoreCase)
+                || fileName.Equals("movie.nfo", StringComparison.OrdinalIgnoreCase)
+                || fileName.StartsWith("folder.", StringComparison.OrdinalIgnoreCase)
+                || fileName.StartsWith("poster.", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (fileName.EndsWith(".strm", StringComparison.OrdinalIgnoreCase)
+                || fileName.EndsWith(".nfo", StringComparison.OrdinalIgnoreCase))
+            {
+                File.Delete(filePath);
+            }
+        }
+    }
+
+    private async Task DownloadArtworkAsync(string imageUrl, string directory, IReadOnlyList<string> baseNames, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(imageUrl))
+        {
+            return;
+        }
+
+        try
+        {
+            var bytes = await HttpClient.GetByteArrayAsync(imageUrl, cancellationToken).ConfigureAwait(false);
+            var extension = GetImageExtension(imageUrl);
+
+            foreach (var baseName in baseNames)
+            {
+                DeleteArtworkVariants(directory, baseName);
+                var targetPath = Path.Combine(directory, baseName + extension);
+                await File.WriteAllBytesAsync(targetPath, bytes, cancellationToken).ConfigureAwait(false);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Failed to download artwork from {ImageUrl}", imageUrl);
+        }
+    }
+
+    private static string GetImageExtension(string imageUrl)
+    {
+        try
+        {
+            var extension = Path.GetExtension(new Uri(imageUrl).AbsolutePath);
+            if (string.Equals(extension, ".jpg", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(extension, ".jpeg", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(extension, ".png", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(extension, ".webp", StringComparison.OrdinalIgnoreCase))
+            {
+                return extension;
+            }
+        }
+        catch (UriFormatException)
+        {
+        }
+
+        return ".jpg";
+    }
+
+    private static void DeleteArtworkVariants(string directory, string baseName)
+    {
+        foreach (var extension in new[] { ".jpg", ".jpeg", ".png", ".webp" })
+        {
+            var candidatePath = Path.Combine(directory, baseName + extension);
+            if (File.Exists(candidatePath))
+            {
+                File.Delete(candidatePath);
+            }
+        }
+    }
+
+    private void TryDeleteDirectory(string directoryPath)
+    {
+        try
+        {
+            if (Directory.Exists(directoryPath))
+            {
+                Directory.Delete(directoryPath, recursive: true);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Failed to delete obsolete synced directory {DirectoryPath}", directoryPath);
+        }
+    }
+
+    private static string BuildDateTag(string tagName, DateTime? date)
+    {
+        return date is DateTime value ? $"\n  <{tagName}>{value:yyyy-MM-dd}</{tagName}>" : string.Empty;
     }
 
     private static string SanitizeFileName(string name)

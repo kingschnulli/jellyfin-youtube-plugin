@@ -71,8 +71,14 @@ public class PluginConfiguration : BasePluginConfiguration
     public string PlaybackTarget { get; set; } = PlaybackTargets.BroadCompatibility720p;
 
     /// <summary>
-    /// Gets or sets the maximum number of videos to sync per source.
-    /// Set to 0 for no limit (not recommended for large channels).
+    /// Gets or sets how many days of videos to keep per source.
+    /// Set to 0 to keep all available videos.
+    /// </summary>
+    public int VideoRetentionDays { get; set; } = 300;
+
+    /// <summary>
+    /// Gets or sets the legacy maximum number of videos to sync per source.
+    /// Retained for backward compatibility with existing saved plugin configuration.
     /// </summary>
     public int MaxVideosPerSource { get; set; } = 200;
 

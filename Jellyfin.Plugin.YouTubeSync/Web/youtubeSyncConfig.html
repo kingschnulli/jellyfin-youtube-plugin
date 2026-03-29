@@ -42,8 +42,8 @@
                 </div>
 
                 <div class="inputContainer">
-                    <input is="emby-input" type="number" id="MaxVideosPerSource" label="Videos to keep per source" min="0" />
-                    <div class="fieldDescription">Maximum number of videos to import from each channel or playlist. Set to <code>0</code> for no limit.</div>
+                    <input is="emby-input" type="number" id="VideoRetentionDays" label="Keep videos from the last (days)" min="0" />
+                    <div class="fieldDescription">Only videos published within this age window are kept in Jellyfin. Set to <code>0</code> to keep everything.</div>
                 </div>
             </div>
 

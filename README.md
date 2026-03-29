@@ -91,7 +91,7 @@ managed through the UI — no manual file editing is required.
 | Jellyfin address | `http://localhost:8096` | Address written into playback links. Use the address your playback devices can actually reach. |
 | Remember playback links for | `5` min | How long playback links are kept before the plugin asks YouTube for fresh ones |
 | Fallback playback preference | `Compatibility first` | Used by Simple playback and as a fallback when Enhanced playback is unavailable |
-| Videos to keep per source | `200` | Maximum number of videos to import from each channel or playlist (`0` = unlimited) |
+| Keep videos from the last | `300` days | Only keep videos published within this age window (`0` = keep everything) |
 | Playback mode | `Simple mode` | `Simple mode` works without ffmpeg. `Enhanced mode` creates a local ffmpeg-backed stream first and falls back automatically if needed |
 | ffmpeg path | `ffmpeg` | Path to the ffmpeg binary used by Enhanced mode |
 | Video encoder | `Software` | Encoder used by Enhanced mode (`Software`, `Intel Quick Sync`, `NVIDIA NVENC`, `VAAPI`, `AMD AMF`) |
@@ -125,6 +125,13 @@ Click **+ Add Channel or Playlist** on the settings page. Each entry needs:
 | Show videos as | `Episodes in a series` or `Separate movies` |
 | Description | Optional text stored with the channel or playlist |
 
+### Library layout
+
+- Channel and series-style playlist content is written as `Channel -> Season YYYY -> Video Folder -> .strm + .nfo`.
+- Seasons are based on the video's release year.
+- Each video's folder also stores local artwork when YouTube provides a thumbnail.
+- During sync, older videos that no longer match the configured age window are removed automatically.
+
 Click **Save** after adding or modifying sources.
 
 ## Adjusting for other Jellyfin versions
@@ -138,7 +145,7 @@ The plugin targets **`targetAbi: 10.11.6.0`**.  To run on a different version:
 
 ## Known limitations (v1)
 
-- Broad compatibility mode is intentionally conservative and may cap many videos at 720p to keep playback stable across more Jellyfin clients.
+- Compatibility first mode is intentionally conservative and may cap many videos at 720p to keep playback stable across more Jellyfin clients.
 - Progressive H.264/AAC streams are typically available only up to 720 p on YouTube; 1080p
    progressive is rare, so 1080p and higher targets often resolve to manifest-based playback URLs instead.
 - Managed transcoding currently ships as one universal 1080p HLS profile. It is intentionally narrow to keep the default lightweight path untouched and to make failure fall back cleanly.

@@ -145,14 +145,14 @@ public class YtDlpService
     /// </summary>
     public async Task<IReadOnlyList<JsonNode>> GetPlaylistEntriesAsync(
         string playlistUrl,
-        int maxVideos,
+        int videoRetentionDays,
         CancellationToken cancellationToken)
     {
         var args = new List<string> { "--flat-playlist", "-J" };
-        if (maxVideos > 0)
+        if (videoRetentionDays > 0)
         {
-            args.Add("--playlist-end");
-            args.Add(maxVideos.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            args.Add("--dateafter");
+            args.Add(DateTime.UtcNow.AddDays(-videoRetentionDays).ToString("yyyyMMdd", System.Globalization.CultureInfo.InvariantCulture));
         }
 
         args.Add(playlistUrl);
@@ -174,6 +174,52 @@ public class YtDlpService
         }
 
         return list;
+    }
+
+    /// <summary>
+    /// Fetches full metadata for a single YouTube video.
+    /// </summary>
+    public async Task<VideoMetadata?> GetVideoMetadataAsync(string videoId, CancellationToken cancellationToken)
+    {
+        var url = $"https://www.youtube.com/watch?v={videoId}";
+        var result = await RunYtDlpJsonAsync(new[] { "-J", "--no-playlist", url }, cancellationToken).ConfigureAwait(false);
+        if (result is null)
+        {
+            return null;
+        }
+
+        var uploadDate = GetString(result, "upload_date");
+        DateTime? publishedUtc = null;
+        if (uploadDate.Length == 8
+            && DateTime.TryParseExact(
+                uploadDate,
+                "yyyyMMdd",
+                System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal,
+                out var parsedDate))
+        {
+            publishedUtc = parsedDate;
+        }
+
+        int? durationSeconds = null;
+        try
+        {
+            durationSeconds = result["duration"]?.GetValue<int>();
+        }
+        catch (InvalidOperationException)
+        {
+        }
+
+        return new VideoMetadata
+        {
+            VideoId = GetString(result, "id"),
+            Title = GetString(result, "title"),
+            Description = GetString(result, "description"),
+            ThumbnailUrl = GetBestThumbnailUrl(result),
+            ChannelName = GetString(result, "channel"),
+            PublishedUtc = publishedUtc,
+            DurationSeconds = durationSeconds
+        };
     }
 
     /// <summary>
@@ -338,4 +384,36 @@ public class YtDlpService
            || playbackUrl.Contains(".m3u8", StringComparison.OrdinalIgnoreCase)
            || playbackUrl.Contains("/api/manifest/", StringComparison.OrdinalIgnoreCase)
            || playbackUrl.Contains(".mpd", StringComparison.OrdinalIgnoreCase);
+
+    private static string GetBestThumbnailUrl(JsonNode? node)
+    {
+        var direct = GetString(node, "thumbnail");
+        if (!string.IsNullOrWhiteSpace(direct))
+        {
+            return direct;
+        }
+
+        var thumbnails = node?["thumbnails"]?.AsArray();
+        if (thumbnails is null || thumbnails.Count == 0)
+        {
+            return string.Empty;
+        }
+
+        var best = thumbnails
+            .Where(t => t is not null)
+            .OrderByDescending(t =>
+            {
+                try { return t!["width"]?.GetValue<int>() ?? 0; }
+                catch (InvalidOperationException) { return 0; }
+            })
+            .FirstOrDefault();
+
+        return GetString(best, "url");
+    }
+
+    private static string GetString(JsonNode? node, string key)
+    {
+        try { return node?[key]?.GetValue<string>() ?? string.Empty; }
+        catch (InvalidOperationException) { return string.Empty; }
+    }
 }

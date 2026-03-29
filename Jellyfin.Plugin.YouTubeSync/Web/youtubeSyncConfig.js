@@ -26,16 +26,18 @@ export default function (view) {
     function renderSources() {
         const list = view.querySelector('#sourcesList');
         if (sources.length === 0) {
-            list.innerHTML = '<p class="fieldDescription">No sources configured. Click <strong>+ Add Source</strong> to add your first channel or playlist.</p>';
+            list.innerHTML = '<p class="fieldDescription">No channels or playlists configured yet. Click <strong>+ Add Channel or Playlist</strong> to add your first one.</p>';
             return;
         }
 
         list.innerHTML = sources.map(function (s, i) {
+            const contentType = s.Type === 'Playlist' ? 'Playlist' : 'Channel';
+            const appearance = s.Mode === 'Movies' ? 'Separate movies' : 'Episodes in a series';
             return '<div class="listItem listItem-border" style="display:flex;align-items:center;padding:.75em 1em;gap:1em;">'
                 + '<div style="flex:1;min-width:0;">'
                 + '<div style="font-weight:600;">' + escapeHtml(s.Name || s.Id) + '</div>'
                 + '<div class="fieldDescription" style="margin:0;">'
-                + escapeHtml(s.Type) + ' &bull; ' + escapeHtml(s.Mode) + ' &bull; '
+                + escapeHtml(contentType) + ' &bull; ' + escapeHtml(appearance) + ' &bull; '
                 + escapeHtml(s.Id)
                 + '</div>'
                 + (s.Description
@@ -70,7 +72,7 @@ export default function (view) {
             ? sources[index]
             : { Id: '', Name: '', Type: 'Channel', Mode: 'Series', Description: '' };
 
-        view.querySelector('#editSourceTitle').textContent = index >= 0 ? 'Edit Source' : 'Add Source';
+        view.querySelector('#editSourceTitle').textContent = index >= 0 ? 'Edit Channel or Playlist' : 'Add Channel or Playlist';
         view.querySelector('#editSourceUrl').value = s.Id;
         view.querySelector('#editSourceName').value = s.Name;
         view.querySelector('#editSourceType').value = s.Type;
@@ -96,7 +98,7 @@ export default function (view) {
             view.querySelector('#JellyfinBaseUrl').value = config.JellyfinBaseUrl || 'http://localhost:8096';
             view.querySelector('#CacheMinutes').value = config.CacheMinutes != null ? config.CacheMinutes : 5;
             view.querySelector('#PlaybackTarget').value = config.PlaybackTarget || 'BroadCompatibility720p';
-            view.querySelector('#MaxVideosPerSource').value = config.MaxVideosPerSource != null ? config.MaxVideosPerSource : 200;
+            view.querySelector('#VideoRetentionDays').value = config.VideoRetentionDays != null ? config.VideoRetentionDays : 300;
             view.querySelector('#AllowManagedTranscoding').value = String(config.AllowManagedTranscoding === true);
             view.querySelector('#FfmpegPath').value = config.FfmpegPath || 'ffmpeg';
             view.querySelector('#ManagedTranscodeHardwareMode').value = config.ManagedTranscodeHardwareMode || 'None';
@@ -118,7 +120,7 @@ export default function (view) {
             JellyfinBaseUrl: view.querySelector('#JellyfinBaseUrl').value.trim(),
             CacheMinutes: parseInt(view.querySelector('#CacheMinutes').value, 10) || 5,
             PlaybackTarget: view.querySelector('#PlaybackTarget').value,
-            MaxVideosPerSource: parseInt(view.querySelector('#MaxVideosPerSource').value, 10) || 0,
+            VideoRetentionDays: parseInt(view.querySelector('#VideoRetentionDays').value, 10) || 0,
             AllowManagedTranscoding: view.querySelector('#AllowManagedTranscoding').value === 'true',
             FfmpegPath: view.querySelector('#FfmpegPath').value.trim(),
             ManagedTranscodeHardwareMode: view.querySelector('#ManagedTranscodeHardwareMode').value,
@@ -152,7 +154,7 @@ export default function (view) {
         const id = view.querySelector('#editSourceUrl').value.trim();
 
         if (!id) {
-            Dashboard.processErrorResponse({ statusText: 'YouTube URL is required.' });
+            Dashboard.processErrorResponse({ statusText: 'A channel or playlist link is required.' });
             return;
         }
 
@@ -196,7 +198,7 @@ export default function (view) {
             }).catch(function () {
                 Dashboard.hideLoadingMsg();
                 // Inform the user and fall back to saving with the URL as the name.
-                Dashboard.alert({ message: 'Could not fetch metadata from YouTube (is yt-dlp installed?). The URL will be used as the display name — you can rename it later.' });
+                Dashboard.alert({ message: 'Could not fetch metadata from YouTube. The link will be used as the name for now, and you can rename it later.' });
                 commitSource(id, description);
             });
         } else {
