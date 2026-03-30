@@ -29,6 +29,12 @@ public sealed class VideoMetadata
     /// <summary>Gets or sets the originating playlist title when the source syncs channel playlists.</summary>
     public string PlaylistTitle { get; set; } = string.Empty;
 
+    /// <summary>Gets or sets the artwork URL detected for the originating playlist when available.</summary>
+    public string PlaylistThumbnailUrl { get; set; } = string.Empty;
+
+    /// <summary>Gets or sets the poster-style artwork URL detected for the originating playlist when available.</summary>
+    public string PlaylistPosterUrl { get; set; } = string.Empty;
+
     /// <summary>Gets or sets the synthetic season number assigned to the playlist.</summary>
     public int? PlaylistSeasonNumber { get; set; }
 

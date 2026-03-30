@@ -84,6 +84,11 @@ internal static class SyncArtworkHelper
         }
     }
 
+    public static string GetArtworkFileName(string imageUrl, string baseName)
+    {
+        return baseName + GetImageExtension(imageUrl);
+    }
+
     private static string GetImageExtension(string imageUrl)
     {
         try

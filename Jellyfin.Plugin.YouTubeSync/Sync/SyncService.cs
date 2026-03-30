@@ -241,6 +241,8 @@ public class SyncService
             retainedVideos.Count,
             name);
 
+        await WriteSeasonMetadataAsync(source, sourceDir, name, retainedVideos, cancellationToken).ConfigureAwait(false);
+
         var seasonEpisodeCounters = SyncSeasonLayout.BuildSeasonEpisodeCounters(retainedVideos, source);
         var filesWritten = 0;
 
@@ -346,13 +348,16 @@ public class SyncService
 
         var strmPath = Path.Combine(videoDir, $"{safeName}.strm");
         var nfoPath = Path.Combine(videoDir, $"{safeName}.nfo");
+        var thumbFileName = string.IsNullOrWhiteSpace(video.ThumbnailUrl)
+            ? string.Empty
+            : SyncArtworkHelper.GetArtworkFileName(video.ThumbnailUrl, "poster");
 
         await WriteVideoShellAsync(video, videoDir, jellyfinBaseUrl, cancellationToken).ConfigureAwait(false);
         _logger.LogDebug("Wrote {StrmPath}", strmPath);
 
         var nfo = sourceMode == SourceMode.Movies
-            ? SyncNfoBuilder.BuildMovieVideoNfo(video, sourceName)
-            : SyncNfoBuilder.BuildEpisodeNfo(video, sourceName, seasonNumber, episodeNumber);
+            ? SyncNfoBuilder.BuildMovieVideoNfo(video, sourceName, thumbFileName)
+            : SyncNfoBuilder.BuildEpisodeNfo(video, sourceName, seasonNumber, episodeNumber, thumbFileName);
         await File.WriteAllTextAsync(nfoPath, nfo, Encoding.UTF8, cancellationToken)
             .ConfigureAwait(false);
 
@@ -373,23 +378,80 @@ public class SyncService
         bool isSeries = source.Type == SourceType.Channel || source.Mode == SourceMode.Series;
         var nfoFileName = isSeries ? "tvshow.nfo" : "movie.nfo";
         var nfoPath = Path.Combine(dir, nfoFileName);
+        var folderFileName = string.IsNullOrWhiteSpace(thumbnailUrl)
+            ? string.Empty
+            : SyncArtworkHelper.GetArtworkFileName(thumbnailUrl, "folder");
+        var posterOrThumbnailUrl = string.IsNullOrWhiteSpace(posterUrl) ? thumbnailUrl : posterUrl;
+        var posterFileName = string.IsNullOrWhiteSpace(posterOrThumbnailUrl)
+            ? string.Empty
+            : SyncArtworkHelper.GetArtworkFileName(posterOrThumbnailUrl, "poster");
+        var bannerFileName = string.IsNullOrWhiteSpace(posterOrThumbnailUrl)
+            ? string.Empty
+            : SyncArtworkHelper.GetArtworkFileName(posterOrThumbnailUrl, "banner");
 
         var content = isSeries
-            ? SyncNfoBuilder.BuildTvShowNfo(source, name, description, thumbnailUrl, playlistSeasonDefinitions)
-            : SyncNfoBuilder.BuildCollectionNfo(source, name, description, thumbnailUrl);
+            ? SyncNfoBuilder.BuildTvShowNfo(source, name, description, folderFileName, posterFileName, bannerFileName, playlistSeasonDefinitions)
+            : SyncNfoBuilder.BuildCollectionNfo(source, name, description, folderFileName, posterFileName);
 
         await File.WriteAllTextAsync(nfoPath, content, Encoding.UTF8, cancellationToken).ConfigureAwait(false);
 
         var artworkDownloads = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
         SyncArtworkHelper.AddArtworkTarget(artworkDownloads, thumbnailUrl, "folder");
 
-        var posterOrThumbnailUrl = string.IsNullOrWhiteSpace(posterUrl) ? thumbnailUrl : posterUrl;
         SyncArtworkHelper.AddArtworkTarget(artworkDownloads, posterOrThumbnailUrl, "poster");
         SyncArtworkHelper.AddArtworkTarget(artworkDownloads, posterOrThumbnailUrl, "banner");
 
         foreach (var artworkDownload in artworkDownloads)
         {
             await SyncArtworkHelper.DownloadArtworkAsync(_logger, artworkDownload.Key, dir, artworkDownload.Value, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private async Task WriteSeasonMetadataAsync(
+        SourceDefinition source,
+        string sourceDir,
+        string sourceName,
+        IReadOnlyList<VideoMetadata> retainedVideos,
+        CancellationToken cancellationToken)
+    {
+        if (source.Mode == SourceMode.Movies || retainedVideos.Count == 0)
+        {
+            return;
+        }
+
+        var seasonGroups = retainedVideos
+            .GroupBy(video => SyncSeasonLayout.GetSeasonFolderName(video, source), StringComparer.OrdinalIgnoreCase)
+            .Where(group => !string.IsNullOrWhiteSpace(group.Key));
+
+        foreach (var seasonGroup in seasonGroups)
+        {
+            var seasonVideos = seasonGroup.ToList();
+            var seasonDir = Path.Combine(sourceDir, seasonGroup.Key);
+            var seasonNumber = SyncSeasonLayout.GetSeasonNumber(seasonVideos[0], source);
+            var seasonTitle = SelectSeasonTitle(source, seasonVideos, seasonGroup.Key);
+            var (folderUrl, posterUrl) = SelectSeasonArtwork(source, seasonVideos);
+
+            Directory.CreateDirectory(seasonDir);
+
+            var seasonArtworkDownloads = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+            SyncArtworkHelper.AddArtworkTarget(seasonArtworkDownloads, folderUrl, "folder");
+            SyncArtworkHelper.AddArtworkTarget(seasonArtworkDownloads, posterUrl, "poster");
+
+            foreach (var artworkDownload in seasonArtworkDownloads)
+            {
+                await SyncArtworkHelper.DownloadArtworkAsync(_logger, artworkDownload.Key, seasonDir, artworkDownload.Value, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+
+            var seasonNfoPath = Path.Combine(seasonDir, "season.nfo");
+            var posterFileName = string.IsNullOrWhiteSpace(posterUrl)
+                ? string.Empty
+                : SyncArtworkHelper.GetArtworkFileName(posterUrl, "poster");
+            var folderFileName = string.IsNullOrWhiteSpace(folderUrl)
+                ? string.Empty
+                : SyncArtworkHelper.GetArtworkFileName(folderUrl, "folder");
+            var seasonNfo = SyncNfoBuilder.BuildSeasonNfo(sourceName, seasonTitle, seasonNumber, posterFileName, folderFileName);
+            await File.WriteAllTextAsync(seasonNfoPath, seasonNfo, Encoding.UTF8, cancellationToken).ConfigureAwait(false);
         }
     }
 
@@ -417,6 +479,8 @@ public class SyncService
             ChannelName = sourceName,
             PlaylistId = GetString(entry, "__playlist_id"),
             PlaylistTitle = GetString(entry, "__playlist_title"),
+            PlaylistThumbnailUrl = GetString(entry, "__playlist_thumbnail_url"),
+            PlaylistPosterUrl = GetString(entry, "__playlist_poster_url"),
             PlaylistSeasonNumber = GetNullableInt(entry, "__playlist_season_number"),
             PlaylistEpisodeNumber = GetNullableInt(entry, "__playlist_episode_number"),
             PublishedUtc = YtDlpService.ParsePublishedDate(entry)
@@ -476,6 +540,16 @@ public class SyncService
             metadata.PlaylistTitle = GetString(entry, "__playlist_title");
         }
 
+        if (string.IsNullOrWhiteSpace(metadata.PlaylistThumbnailUrl))
+        {
+            metadata.PlaylistThumbnailUrl = GetString(entry, "__playlist_thumbnail_url");
+        }
+
+        if (string.IsNullOrWhiteSpace(metadata.PlaylistPosterUrl))
+        {
+            metadata.PlaylistPosterUrl = GetString(entry, "__playlist_poster_url");
+        }
+
         if (metadata.PlaylistSeasonNumber is null)
         {
             metadata.PlaylistSeasonNumber = GetNullableInt(entry, "__playlist_season_number");
@@ -490,6 +564,83 @@ public class SyncService
         {
             metadata.PublishedUtc = YtDlpService.ParsePublishedDate(entry);
         }
+    }
+
+    private static (string FolderUrl, string PosterUrl) SelectSeasonArtwork(
+        SourceDefinition source,
+        IReadOnlyList<VideoMetadata> seasonVideos)
+    {
+        var fallbackThumbnailUrl = SelectSeasonFallbackThumbnailUrl(source, seasonVideos);
+
+        if (source.Type == SourceType.Channel && source.Feed == ChannelFeed.Playlists)
+        {
+            var playlistThumbnailUrl = seasonVideos
+                .Select(video => video.PlaylistThumbnailUrl)
+                .FirstOrDefault(url => !string.IsNullOrWhiteSpace(url)) ?? string.Empty;
+            var playlistPosterUrl = seasonVideos
+                .Select(video => video.PlaylistPosterUrl)
+                .FirstOrDefault(url => !string.IsNullOrWhiteSpace(url)) ?? string.Empty;
+
+            var folderUrl = !string.IsNullOrWhiteSpace(playlistThumbnailUrl)
+                ? playlistThumbnailUrl
+                : !string.IsNullOrWhiteSpace(playlistPosterUrl)
+                    ? playlistPosterUrl
+                    : fallbackThumbnailUrl;
+            var posterUrl = !string.IsNullOrWhiteSpace(playlistPosterUrl)
+                ? playlistPosterUrl
+                : !string.IsNullOrWhiteSpace(playlistThumbnailUrl)
+                    ? playlistThumbnailUrl
+                    : fallbackThumbnailUrl;
+
+            return (folderUrl, posterUrl);
+        }
+
+        return (fallbackThumbnailUrl, fallbackThumbnailUrl);
+    }
+
+    private static string SelectSeasonFallbackThumbnailUrl(
+        SourceDefinition source,
+        IReadOnlyList<VideoMetadata> seasonVideos)
+    {
+        IEnumerable<VideoMetadata> candidates = seasonVideos
+            .Where(video => !string.IsNullOrWhiteSpace(video.ThumbnailUrl));
+
+        VideoMetadata? selectedVideo;
+        if (source.Type == SourceType.Channel && source.Feed == ChannelFeed.Playlists)
+        {
+            selectedVideo = candidates
+                .OrderByDescending(video => video.PlaylistEpisodeNumber ?? int.MinValue)
+                .ThenByDescending(video => video.PublishedUtc ?? DateTime.MinValue)
+                .ThenBy(video => video.Title, StringComparer.OrdinalIgnoreCase)
+                .FirstOrDefault();
+        }
+        else
+        {
+            selectedVideo = candidates
+                .OrderByDescending(video => video.PublishedUtc ?? DateTime.MinValue)
+                .ThenBy(video => video.Title, StringComparer.OrdinalIgnoreCase)
+                .FirstOrDefault();
+        }
+
+        return selectedVideo?.ThumbnailUrl ?? string.Empty;
+    }
+
+    private static string SelectSeasonTitle(
+        SourceDefinition source,
+        IReadOnlyList<VideoMetadata> seasonVideos,
+        string seasonFolderName)
+    {
+        if (source.Type == SourceType.Channel && source.Feed == ChannelFeed.Playlists)
+        {
+            return seasonVideos
+                .Select(video => video.PlaylistTitle)
+                .FirstOrDefault(title => !string.IsNullOrWhiteSpace(title))
+                ?? seasonFolderName;
+        }
+
+        return seasonVideos[0].PublishedUtc is DateTime publishedUtc
+            ? publishedUtc.Year.ToString(System.Globalization.CultureInfo.InvariantCulture)
+            : seasonFolderName;
     }
 
     private void CleanupObsoleteContent(
@@ -533,6 +684,16 @@ public class SyncService
                     TryDeleteDirectory(videoDirectory);
                 }
             }
+        }
+
+        DeleteLegacySeasonPosterAliases(sourceDir);
+    }
+
+    private static void DeleteLegacySeasonPosterAliases(string sourceDir)
+    {
+        foreach (var filePath in Directory.EnumerateFiles(sourceDir, "season*-poster.*"))
+        {
+            File.Delete(filePath);
         }
     }
 

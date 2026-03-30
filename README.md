@@ -136,6 +136,7 @@ Click **+ Add Channel or Playlist** on the settings page. Each entry needs:
 
 - Channel and series-style playlist content is written as `Channel -> Season YYYY -> Video Folder -> .strm + .nfo`.
 - Seasons are based on the video's release year.
+- Season folders now get a `season.nfo` plus local artwork. Year-based seasons use the newest video's thumbnail, while playlist seasons prefer playlist artwork and otherwise fall back to the last or newest video's thumbnail in that playlist.
 - Each video's folder also stores local artwork when YouTube provides a thumbnail.
 - During sync, older videos that no longer match the configured age window are removed automatically.
 

@@ -70,6 +70,11 @@ public sealed class SyncPlaylistFeedExpander
             }
 
             discoveredPlaylists++;
+            var playlistInfo = await _ytDlpService.GetSourceInfoAsync(playlistUrl, cancellationToken).ConfigureAwait(false);
+            var playlistThumbnailUrl = playlistInfo?.ThumbnailUrl ?? string.Empty;
+            var playlistPosterUrl = string.IsNullOrWhiteSpace(playlistInfo?.PosterUrl)
+                ? playlistThumbnailUrl
+                : playlistInfo.PosterUrl;
             var playlistVideos = await _ytDlpService
                 .GetPlaylistEntriesAsync(playlistUrl, 0, 0, cancellationToken)
                 .ConfigureAwait(false);
@@ -83,7 +88,14 @@ public sealed class SyncPlaylistFeedExpander
                     continue;
                 }
 
-                AttachPlaylistMetadata(videoEntry, playlistId, seasonDefinition, index + 1, videoId);
+                AttachPlaylistMetadata(
+                    videoEntry,
+                    playlistId,
+                    seasonDefinition,
+                    index + 1,
+                    videoId,
+                    playlistThumbnailUrl,
+                    playlistPosterUrl);
                 expandedEntries.Add(videoEntry);
             }
         }
@@ -102,7 +114,9 @@ public sealed class SyncPlaylistFeedExpander
         string playlistId,
         PlaylistSeasonDefinition seasonDefinition,
         int episodeNumber,
-        string videoId)
+        string videoId,
+        string playlistThumbnailUrl,
+        string playlistPosterUrl)
     {
         if (videoEntry is not JsonObject videoObject)
         {
@@ -114,6 +128,16 @@ public sealed class SyncPlaylistFeedExpander
         videoObject["__playlist_season_number"] = seasonDefinition.SeasonNumber;
         videoObject["__playlist_episode_number"] = episodeNumber;
         videoObject["__sync_id"] = playlistId + ":" + videoId;
+
+        if (!string.IsNullOrWhiteSpace(playlistThumbnailUrl))
+        {
+            videoObject["__playlist_thumbnail_url"] = playlistThumbnailUrl;
+        }
+
+        if (!string.IsNullOrWhiteSpace(playlistPosterUrl))
+        {
+            videoObject["__playlist_poster_url"] = playlistPosterUrl;
+        }
     }
 
     private static string GetChannelPlaylistUrl(JsonNode entry)
