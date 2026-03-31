@@ -1,3 +1,4 @@
+using System;
 using System.Net.Mime;
 using System.IO;
 using System.Threading;
@@ -102,6 +103,13 @@ public class YouTubeSyncController : ControllerBase
         if (!_managedTranscodeService.TryGetSessionFile(sessionId, fileName, out var filePath, out var contentType))
         {
             return NotFound();
+        }
+
+        if (fileName.EndsWith(".m3u8", StringComparison.OrdinalIgnoreCase))
+        {
+            Response.Headers.CacheControl = "no-store, no-cache, must-revalidate";
+            Response.Headers.Pragma = "no-cache";
+            Response.Headers.Expires = "0";
         }
 
         return PhysicalFile(filePath, contentType, enableRangeProcessing: false);

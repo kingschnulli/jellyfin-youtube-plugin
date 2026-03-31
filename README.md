@@ -1,161 +1,56 @@
 # YouTubeSync – Jellyfin Plugin
 
-A minimal Jellyfin plugin that integrates YouTube channels and playlists into your library
-via **yt-dlp**, without pre-downloading any content.
+Watch YouTube channels and playlists directly in Jellyfin — no downloading required.
 
-## How it works
+The plugin syncs metadata and artwork from YouTube into your library and streams videos on demand using [yt-dlp](https://github.com/yt-dlp/yt-dlp).
 
-1. **Sync task** – runs on a schedule (default every 6 h) and creates one sub-folder per
-   configured source inside your library path.  Each folder contains:
-   - `tvshow.nfo` (for channels / series playlists) or `movie.nfo` (for movie-mode playlists)
-   - `<VideoTitle>.strm` – points to the built-in resolver endpoint
-   - `<VideoTitle>.nfo` – episode metadata from yt-dlp's flat-playlist output
+## Installation
 
-2. **Simple playback** – the plugin asks `yt-dlp` for a playable YouTube URL, caches it briefly,
-   and hands it to Jellyfin. This is the lightest setup and works without `ffmpeg`.
-
-3. **Enhanced playback (optional)** – when enabled, the plugin first tries to create a cleaner,
-   disk-backed local HLS stream using `ffmpeg` and higher-quality YouTube inputs. If that cannot
-   start for any reason, playback automatically falls back to Simple playback.
-
-## Requirements
-
-| Dependency | Notes |
-|---|---|
-| Jellyfin | 10.11.6 |
-| yt-dlp | must be on PATH inside the container (or configure full path in plugin settings) |
-| .NET SDK | 9.0 (build only) |
-
-## Building
-
-```bash
-dotnet publish Jellyfin.Plugin.YouTubeSync/Jellyfin.Plugin.YouTubeSync.csproj \
-  -c Release \
-   -p:Version=0.0.32.0 \
-   -p:AssemblyVersion=0.0.32.0 \
-   -p:FileVersion=0.0.32.0 \
-   -p:InformationalVersion=0.0.32 \
-  --no-self-contained \
-  -o publish/
-```
-
-The output folder will contain `Jellyfin.Plugin.YouTubeSync.dll`.
-If you omit the version properties, the assembly defaults to `1.0.0.0`, which is what Jellyfin shows on the installed plugin screen.
-
-## Manual deployment
-
-```bash
-PLUGIN_DIR="/config/plugins/YouTubeSync"
-mkdir -p "$PLUGIN_DIR"
-cp publish/Jellyfin.Plugin.YouTubeSync.dll "$PLUGIN_DIR/"
-cp Jellyfin.Plugin.YouTubeSync/meta.json   "$PLUGIN_DIR/"
-```
-
-Restart Jellyfin.  The plugin will appear under **Dashboard → Plugins**.
-
-## Adding as a Jellyfin plugin repository
-
-The `manifest.json` at the root of this repository is automatically updated on every tagged
-release by the included GitHub Actions workflow.
-
-Add the following URL in Jellyfin under
-**Dashboard → Plugins → Repositories → +**:
+Add the plugin repository in Jellyfin under **Dashboard → Plugins → Repositories → +** :
 
 ```
 https://raw.githubusercontent.com/kingschnulli/jellyfin-youtube-plugin/main/manifest.json
 ```
 
-You can then install / update the plugin directly from the Jellyfin UI.
+Then install **YouTubeSync** from the plugin catalogue and restart Jellyfin.
 
-## Automated releases (CI)
+### Requirements
 
-Push a version tag to trigger a release:
+- **Jellyfin 10.11.6** or compatible
+- **yt-dlp** available on PATH (or configured in plugin settings)
+- **ffmpeg** (only needed for Enhanced playback mode)
+
+## Getting started
+
+1. Open **Dashboard → Plugins → YouTubeSync → Settings**.
+2. Set the **Library folder** to a path inside one of your Jellyfin libraries (e.g. `/media/youtube`).
+3. Set the **Jellyfin address** to the URL your playback devices use to reach the server.
+4. Click **+ Add Channel or Playlist**, paste a YouTube URL, give it a name, and save.
+5. The sync task runs automatically every 6 hours. You can also trigger it manually from **Dashboard → Scheduled Tasks**.
+
+After sync, your YouTube content appears in Jellyfin organised by channel, season (year), and episode — complete with artwork and metadata.
+
+## Playback modes
+
+| Mode | What it does | Needs ffmpeg? |
+|---|---|---|
+| **Simple** (default) | Hands Jellyfin a direct YouTube stream URL. Lightweight and easy. | No |
+| **Enhanced** | Re-streams through a local ffmpeg process for more consistent quality. Falls back to Simple automatically if anything goes wrong. | Yes |
+
+You can switch between modes in the plugin settings at any time.
+
+## Known limitations
+
+- Simple mode may cap at 720p to keep playback stable across different clients.
+- Enhanced mode currently outputs a single 1080p HLS profile.
+- Age-restricted or members-only videos will not play (no cookie support yet).
+
+## Build from source
 
 ```bash
-git tag v1.0.0
-git push origin v1.0.0
+dotnet publish Jellyfin.Plugin.YouTubeSync/Jellyfin.Plugin.YouTubeSync.csproj \
+  -c Release --no-self-contained -o publish/
 ```
 
-The workflow (`.github/workflows/release.yml`) will:
-1. Build and publish the plugin.
-2. Package `Jellyfin.Plugin.YouTubeSync.dll` + `meta.json` into a ZIP.
-3. Create a GitHub Release with the ZIP attached.
-4. Update `manifest.json` with the new version entry and push it back to `main`.
-
-The release workflow stamps the assembly version during publish so Jellyfin shows the release version in the installed plugin screen instead of `1.0.0.0`.
-
-## Configuration
-
-Open **Dashboard → Plugins → YouTubeSync → Settings** after installation.  All settings are
-managed through the UI — no manual file editing is required.
-
-### General settings
-
-| Setting | Default | Description |
-|---|---|---|
-| yt-dlp path | `yt-dlp` | Path to the yt-dlp binary |
-| Library folder | `/media/youtube` | Folder inside a Jellyfin library where YouTube items are created |
-| Jellyfin address | `http://localhost:8096` | Address written into playback links. Use the address your playback devices can actually reach. |
-| Remember playback links for | `5` min | How long playback links are kept before the plugin asks YouTube for fresh ones |
-| Fallback playback preference | `Compatibility first` | Used by Simple playback and as a fallback when Enhanced playback is unavailable |
-| Keep videos from the last | `300` days | Only keep videos published within this age window (`0` = keep everything) |
-| Playback mode | `Simple mode` | `Simple mode` works without ffmpeg. `Enhanced mode` creates a local ffmpeg-backed stream first and falls back automatically if needed |
-| ffmpeg path | `ffmpeg` | Path to the ffmpeg binary used by Enhanced mode |
-| Video encoder | `Software` | Encoder used by Enhanced mode (`Software`, `Intel Quick Sync`, `NVIDIA NVENC`, `VAAPI`, `AMD AMF`) |
-| Stop unused enhanced streams after | `2` min | Idle timeout before an Enhanced mode stream is stopped and deleted |
-| Concurrent enhanced streams | `2` | Maximum number of Enhanced mode playbacks before new requests fall back to Simple mode |
-
-### Fallback playback preference
-
-| Target | Behavior |
-|---|---|
-| Compatibility first | Best default for mixed clients. Prefers simpler streams that are more likely to play cleanly everywhere. |
-| Balanced | Aims for a good middle ground between compatibility and quality. |
-| Highest single-stream quality | Asks YouTube for the best single playable stream it can provide. Highest quality, lowest predictability. |
-
-### Playback mode guidance
-
-- Use Simple mode if you want the lightest setup and do not want to depend on ffmpeg.
-- Use Enhanced mode if you want sharper, more consistent playback on devices that benefit from a locally generated stream.
-- Enhanced mode is best-effort. If ffmpeg or the selected encoder cannot start, playback automatically falls back to Simple mode.
-- The first Enhanced mode profile normalizes playback to a local HLS stream using H.264 video and AAC audio for broad compatibility.
-
-### Adding a channel or playlist
-
-Click **+ Add Channel or Playlist** on the settings page. Each entry needs:
-
-| Field | Description |
-|---|---|
-| Channel or playlist link | The full YouTube channel or playlist URL |
-| Name in Jellyfin | Display name used in Jellyfin and for the folder name |
-| Content type | `Channel` or `Playlist` |
-| Show videos as | `Episodes in a series` or `Separate movies` |
-| Description | Optional text stored with the channel or playlist |
-
-### Library layout
-
-- Channel and series-style playlist content is written as `Channel -> Season YYYY -> Video Folder -> .strm + .nfo`.
-- Seasons are based on the video's release year.
-- Season folders now get a `season.nfo` plus local artwork. Year-based seasons use the newest video's thumbnail, while playlist seasons prefer playlist artwork and otherwise fall back to the last or newest video's thumbnail in that playlist.
-- Each video's folder also stores local artwork when YouTube provides a thumbnail.
-- During sync, older videos that no longer match the configured age window are removed automatically.
-
-Click **Save** after adding or modifying sources.
-
-## Adjusting for other Jellyfin versions
-
-The plugin targets **`targetAbi: 10.11.6.0`**.  To run on a different version:
-
-1. Change the `<PackageReference>` versions in `Jellyfin.Plugin.YouTubeSync.csproj`
-   to match your Jellyfin version.
-2. Update `"targetAbi"` in `Jellyfin.Plugin.YouTubeSync/meta.json`.
-3. Rebuild and redeploy.
-
-## Known limitations (v1)
-
-- Compatibility first mode is intentionally conservative and may cap many videos at 720p to keep playback stable across more Jellyfin clients.
-- Progressive H.264/AAC streams are typically available only up to 720 p on YouTube; 1080p
-   progressive is rare, so 1080p and higher targets often resolve to manifest-based playback URLs instead.
-- Managed transcoding currently ships as one universal 1080p HLS profile. It is intentionally narrow to keep the default lightweight path untouched and to make failure fall back cleanly.
-- No cookie support – age-restricted or member-only videos will not resolve.
+Copy the resulting DLL and `meta.json` into your Jellyfin plugins folder and restart.
 

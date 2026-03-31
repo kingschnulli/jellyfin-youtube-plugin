@@ -94,6 +94,7 @@ public class SyncService
 
         var maxEntryScanCount = GetMaxEntryScanCount(config.VideoRetentionDays, config.MaxVideosPerSource);
         var playlistDiscoveryLimit = GetPlaylistDiscoveryLimit(config.RecentPlaylistsToKeep);
+    var playlistVideoLimit = GetPlaylistVideoLimit(config.MaxVideosPerSource);
 
         if (isChannelPlaylistFeed)
         {
@@ -102,6 +103,14 @@ public class SyncService
                 _logger.LogInformation(
                     "Applying playlist discovery limit {PlaylistDiscoveryLimit} for source '{Name}'.",
                     playlistDiscoveryLimit,
+                    name);
+            }
+
+            if (playlistVideoLimit > 0)
+            {
+                _logger.LogInformation(
+                    "Applying per-playlist entry scan limit {PlaylistVideoLimit} for source '{Name}'.",
+                    playlistVideoLimit,
                     name);
             }
         }
@@ -127,7 +136,7 @@ public class SyncService
         if (isChannelPlaylistFeed)
         {
             playlistSeasonDefinitions = _playlistFeedExpander.BuildSeasonDefinitions(entries);
-            entries = await _playlistFeedExpander.ExpandAsync(entries, playlistSeasonDefinitions, cancellationToken)
+            entries = await _playlistFeedExpander.ExpandAsync(entries, playlistSeasonDefinitions, playlistVideoLimit, cancellationToken)
                 .ConfigureAwait(false);
         }
 
@@ -301,7 +310,7 @@ public class SyncService
         _logger.LogInformation("Completed sync for source '{Name}'", name);
     }
 
-    private async Task WriteVideoShellAsync(
+    private async Task<bool> WriteVideoShellAsync(
         VideoMetadata video,
         string videoDir,
         string jellyfinBaseUrl,
@@ -309,7 +318,7 @@ public class SyncService
     {
         if (string.IsNullOrWhiteSpace(video.VideoId))
         {
-            return;
+            return false;
         }
 
         var title = string.IsNullOrWhiteSpace(video.Title) ? video.VideoId : video.Title;
@@ -318,8 +327,7 @@ public class SyncService
 
         var strmPath = Path.Combine(videoDir, $"{safeName}.strm");
         var resolverUrl = $"{jellyfinBaseUrl.TrimEnd('/')}/YouTubeSync/resolve/{video.VideoId}";
-        await File.WriteAllTextAsync(strmPath, resolverUrl, Encoding.UTF8, cancellationToken)
-            .ConfigureAwait(false);
+        return await WriteTextFileIfChangedAsync(strmPath, resolverUrl, cancellationToken).ConfigureAwait(false);
     }
 
     private async Task WriteVideoFilesAsync(
@@ -352,14 +360,13 @@ public class SyncService
             ? string.Empty
             : SyncArtworkHelper.GetArtworkFileName(video.ThumbnailUrl, "poster");
 
-        await WriteVideoShellAsync(video, videoDir, jellyfinBaseUrl, cancellationToken).ConfigureAwait(false);
-        _logger.LogDebug("Wrote {StrmPath}", strmPath);
+        var strmWritten = await WriteVideoShellAsync(video, videoDir, jellyfinBaseUrl, cancellationToken).ConfigureAwait(false);
+        _logger.LogDebug(strmWritten ? "Updated {StrmPath}" : "Kept existing {StrmPath}", strmPath);
 
         var nfo = sourceMode == SourceMode.Movies
             ? SyncNfoBuilder.BuildMovieVideoNfo(video, sourceName, thumbFileName)
             : SyncNfoBuilder.BuildEpisodeNfo(video, sourceName, seasonNumber, episodeNumber, thumbFileName);
-        await File.WriteAllTextAsync(nfoPath, nfo, Encoding.UTF8, cancellationToken)
-            .ConfigureAwait(false);
+        await WriteTextFileIfChangedAsync(nfoPath, nfo, cancellationToken).ConfigureAwait(false);
 
         await SyncArtworkHelper.DownloadArtworkAsync(_logger, video.ThumbnailUrl, videoDir, new[] { "folder", "poster" }, cancellationToken)
             .ConfigureAwait(false);
@@ -393,7 +400,7 @@ public class SyncService
             ? SyncNfoBuilder.BuildTvShowNfo(source, name, description, folderFileName, posterFileName, bannerFileName, playlistSeasonDefinitions)
             : SyncNfoBuilder.BuildCollectionNfo(source, name, description, folderFileName, posterFileName);
 
-        await File.WriteAllTextAsync(nfoPath, content, Encoding.UTF8, cancellationToken).ConfigureAwait(false);
+        await WriteTextFileIfChangedAsync(nfoPath, content, cancellationToken).ConfigureAwait(false);
 
         var artworkDownloads = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
         SyncArtworkHelper.AddArtworkTarget(artworkDownloads, thumbnailUrl, "folder");
@@ -451,8 +458,23 @@ public class SyncService
                 ? string.Empty
                 : SyncArtworkHelper.GetArtworkFileName(folderUrl, "folder");
             var seasonNfo = SyncNfoBuilder.BuildSeasonNfo(sourceName, seasonTitle, seasonNumber, posterFileName, folderFileName);
-            await File.WriteAllTextAsync(seasonNfoPath, seasonNfo, Encoding.UTF8, cancellationToken).ConfigureAwait(false);
+            await WriteTextFileIfChangedAsync(seasonNfoPath, seasonNfo, cancellationToken).ConfigureAwait(false);
         }
+    }
+
+    private static async Task<bool> WriteTextFileIfChangedAsync(string filePath, string content, CancellationToken cancellationToken)
+    {
+        if (File.Exists(filePath))
+        {
+            var existingContent = await File.ReadAllTextAsync(filePath, cancellationToken).ConfigureAwait(false);
+            if (string.Equals(existingContent, content, StringComparison.Ordinal))
+            {
+                return false;
+            }
+        }
+
+        await File.WriteAllTextAsync(filePath, content, Encoding.UTF8, cancellationToken).ConfigureAwait(false);
+        return true;
     }
 
     private static string GetString(JsonNode? node, string key)
@@ -787,5 +809,10 @@ public class SyncService
     private static int GetPlaylistDiscoveryLimit(int recentPlaylistsToKeep)
     {
         return recentPlaylistsToKeep > 0 ? recentPlaylistsToKeep : 0;
+    }
+
+    private static int GetPlaylistVideoLimit(int maxVideosPerSource)
+    {
+        return maxVideosPerSource > 0 ? maxVideosPerSource : 0;
     }
 }

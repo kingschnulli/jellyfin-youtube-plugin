@@ -54,10 +54,10 @@ public sealed class ManagedTranscodeService : IDisposable
         {
             CleanupExpiredSessions();
 
-            var existingSessionPath = TryReuseExistingSession(videoId);
-            if (!string.IsNullOrWhiteSpace(existingSessionPath))
+            var existingSession = TryReuseExistingSession(videoId);
+            if (existingSession is not null)
             {
-                return existingSessionPath;
+                return $"/YouTubeSync/session/{existingSession.SessionId}/{PlaylistFileName}";
             }
 
             var activeSessions = _sessions.Count(static pair => !pair.Value.Process.HasExited);
@@ -123,7 +123,7 @@ public sealed class ManagedTranscodeService : IDisposable
             }
 
             _logger.LogInformation("Managed transcoding session {SessionId} is ready for video {VideoId}", sessionId, videoId);
-            return BuildSessionPath(sessionId);
+            return $"/YouTubeSync/session/{sessionId}/{PlaylistFileName}";
         }
         finally
         {
@@ -179,7 +179,7 @@ public sealed class ManagedTranscodeService : IDisposable
         return "application/octet-stream";
     }
 
-    private string? TryReuseExistingSession(string videoId)
+    private ManagedTranscodeSession? TryReuseExistingSession(string videoId)
     {
         foreach (var pair in _sessions)
         {
@@ -205,15 +205,10 @@ public sealed class ManagedTranscodeService : IDisposable
                 "Reusing managed transcoding session {SessionId} for video {VideoId}",
                 session.SessionId,
                 videoId);
-            return BuildSessionPath(session.SessionId);
+            return session;
         }
 
         return null;
-    }
-
-    private static string BuildSessionPath(string sessionId)
-    {
-        return $"/YouTubeSync/session/{sessionId}/{PlaylistFileName}";
     }
 
     private Process CreateFfmpegProcess(
@@ -518,7 +513,7 @@ public sealed class ManagedTranscodeService : IDisposable
         }
 
         _disposed = true;
-    _sessionCreateGate.Dispose();
+        _sessionCreateGate.Dispose();
         _cleanupTimer.Dispose();
 
         foreach (var sessionId in _sessions.Keys.ToArray())
