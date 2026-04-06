@@ -38,8 +38,15 @@ internal static class SyncArtworkHelper
             using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             timeoutCts.CancelAfter(ArtworkDownloadTimeout);
 
-            var bytes = await HttpClient.GetByteArrayAsync(imageUrl, timeoutCts.Token).ConfigureAwait(false);
-            var extension = GetImageExtension(imageUrl);
+            var downloadResult = await TryDownloadArtworkBytesAsync(imageUrl, timeoutCts.Token).ConfigureAwait(false);
+            if (downloadResult is null)
+            {
+                logger.LogWarning("Failed to download artwork from {ImageUrl}", imageUrl);
+                return;
+            }
+
+            var (resolvedUrl, bytes) = downloadResult.Value;
+            var extension = GetImageExtension(resolvedUrl);
 
             foreach (var baseName in baseNames)
             {
@@ -107,6 +114,205 @@ internal static class SyncArtworkHelper
         }
 
         return ".jpg";
+    }
+
+    private static async Task<(string ResolvedUrl, byte[] Bytes)?> TryDownloadArtworkBytesAsync(string imageUrl, CancellationToken cancellationToken)
+    {
+        foreach (var candidateUrl in EnumerateArtworkDownloadUrls(imageUrl))
+        {
+            try
+            {
+                var bytes = await HttpClient.GetByteArrayAsync(candidateUrl, cancellationToken).ConfigureAwait(false);
+                return (candidateUrl, bytes);
+            }
+            catch (HttpRequestException)
+            {
+            }
+        }
+
+        return null;
+    }
+
+    private static IEnumerable<string> EnumerateArtworkDownloadUrls(string imageUrl)
+    {
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        if (seen.Add(imageUrl))
+        {
+            yield return imageUrl;
+        }
+
+        if (!TryParseYoutubeThumbnail(imageUrl, out var prefix, out var videoId, out var fileName, out var extension))
+        {
+            yield break;
+        }
+
+        foreach (var candidateFileName in EnumerateYoutubeThumbnailFallbackFileNames(fileName))
+        {
+            var candidateUrl = $"https://i.ytimg.com/{prefix}/{videoId}/{candidateFileName}{extension}";
+            if (seen.Add(candidateUrl))
+            {
+                yield return candidateUrl;
+            }
+        }
+
+        foreach (var alternatePrefix in EnumerateAlternateYoutubePrefixes(prefix))
+        {
+            var candidateUrl = $"https://i.ytimg.com/{alternatePrefix}/{videoId}/{fileName}{extension}";
+            if (seen.Add(candidateUrl))
+            {
+                yield return candidateUrl;
+            }
+
+            foreach (var candidateFileName in EnumerateYoutubeThumbnailFallbackFileNames(fileName))
+            {
+                candidateUrl = $"https://i.ytimg.com/{alternatePrefix}/{videoId}/{candidateFileName}{extension}";
+                if (seen.Add(candidateUrl))
+                {
+                    yield return candidateUrl;
+                }
+            }
+        }
+
+        foreach (var alternateExtension in EnumerateAlternateYoutubeExtensions(extension))
+        {
+            var candidateUrl = $"https://i.ytimg.com/{prefix}/{videoId}/{fileName}{alternateExtension}";
+            if (seen.Add(candidateUrl))
+            {
+                yield return candidateUrl;
+            }
+
+            foreach (var candidateFileName in EnumerateYoutubeThumbnailFallbackFileNames(fileName))
+            {
+                candidateUrl = $"https://i.ytimg.com/{prefix}/{videoId}/{candidateFileName}{alternateExtension}";
+                if (seen.Add(candidateUrl))
+                {
+                    yield return candidateUrl;
+                }
+            }
+
+            foreach (var alternatePrefix in EnumerateAlternateYoutubePrefixes(prefix))
+            {
+                candidateUrl = $"https://i.ytimg.com/{alternatePrefix}/{videoId}/{fileName}{alternateExtension}";
+                if (seen.Add(candidateUrl))
+                {
+                    yield return candidateUrl;
+                }
+
+                foreach (var candidateFileName in EnumerateYoutubeThumbnailFallbackFileNames(fileName))
+                {
+                    candidateUrl = $"https://i.ytimg.com/{alternatePrefix}/{videoId}/{candidateFileName}{alternateExtension}";
+                    if (seen.Add(candidateUrl))
+                    {
+                        yield return candidateUrl;
+                    }
+                }
+            }
+        }
+    }
+
+    private static IEnumerable<string> EnumerateYoutubeThumbnailFallbackFileNames(string fileName)
+    {
+        yield return fileName;
+
+        if (fileName.Equals("maxresdefault", StringComparison.OrdinalIgnoreCase))
+        {
+            yield return "hq720";
+            yield return "sddefault";
+            yield return "hqdefault";
+            yield return "mqdefault";
+            yield return "default";
+            yield break;
+        }
+
+        if (fileName.Equals("hq720", StringComparison.OrdinalIgnoreCase))
+        {
+            yield return "sddefault";
+            yield return "hqdefault";
+            yield return "mqdefault";
+            yield return "default";
+            yield break;
+        }
+
+        if (fileName.Equals("sddefault", StringComparison.OrdinalIgnoreCase))
+        {
+            yield return "hqdefault";
+            yield return "mqdefault";
+            yield return "default";
+            yield break;
+        }
+
+        if (fileName.Equals("hqdefault", StringComparison.OrdinalIgnoreCase))
+        {
+            yield return "mqdefault";
+            yield return "default";
+            yield break;
+        }
+
+        if (fileName.Equals("mqdefault", StringComparison.OrdinalIgnoreCase))
+        {
+            yield return "default";
+        }
+    }
+
+    private static IEnumerable<string> EnumerateAlternateYoutubePrefixes(string prefix)
+    {
+        if (prefix.Equals("vi_webp", StringComparison.OrdinalIgnoreCase))
+        {
+            yield return "vi";
+        }
+        else if (prefix.Equals("vi", StringComparison.OrdinalIgnoreCase))
+        {
+            yield return "vi_webp";
+        }
+    }
+
+    private static IEnumerable<string> EnumerateAlternateYoutubeExtensions(string extension)
+    {
+        if (extension.Equals(".webp", StringComparison.OrdinalIgnoreCase))
+        {
+            yield return ".jpg";
+        }
+        else if (extension.Equals(".jpg", StringComparison.OrdinalIgnoreCase)
+            || extension.Equals(".jpeg", StringComparison.OrdinalIgnoreCase))
+        {
+            yield return ".webp";
+        }
+    }
+
+    private static bool TryParseYoutubeThumbnail(
+        string imageUrl,
+        out string prefix,
+        out string videoId,
+        out string fileName,
+        out string extension)
+    {
+        prefix = string.Empty;
+        videoId = string.Empty;
+        fileName = string.Empty;
+        extension = string.Empty;
+
+        if (!Uri.TryCreate(imageUrl, UriKind.Absolute, out var uri)
+            || !uri.Host.EndsWith("ytimg.com", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var segments = uri.AbsolutePath.Trim('/').Split('/', StringSplitOptions.RemoveEmptyEntries);
+        if (segments.Length != 3)
+        {
+            return false;
+        }
+
+        prefix = segments[0];
+        videoId = segments[1];
+        extension = Path.GetExtension(segments[2]);
+        fileName = Path.GetFileNameWithoutExtension(segments[2]);
+
+        return !string.IsNullOrWhiteSpace(prefix)
+            && !string.IsNullOrWhiteSpace(videoId)
+            && !string.IsNullOrWhiteSpace(fileName)
+            && !string.IsNullOrWhiteSpace(extension);
     }
 
     private static bool AreAllArtworkTargetsPresent(string directory, IReadOnlyList<string> baseNames)
