@@ -92,31 +92,82 @@ public class YtDlpService
     public async Task<ManagedPlaybackInput?> GetManagedPlaybackInputAsync(string videoId, CancellationToken cancellationToken)
     {
         var url = $"https://www.youtube.com/watch?v={videoId}";
-        var result = await RunYtDlpTextAsync(
-            new[] { "-f", ManagedPlaybackInputSelector, "--get-url", "--no-playlist", url },
+        var result = await RunYtDlpJsonAsync(
+            new[] { "-f", ManagedPlaybackInputSelector, "-j", "--no-playlist", "--no-cookies", "--extractor-args", "youtube:player_client=visionos,ios", url },
             cancellationToken).ConfigureAwait(false);
 
-        if (string.IsNullOrWhiteSpace(result))
+        if (result is null)
         {
             return null;
         }
 
-        var lines = result
-            .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        var requestedFormats = result["requested_formats"]?.AsArray();
+        if (requestedFormats is not null && requestedFormats.Count >= 2)
+        {
+            var videoFormat = requestedFormats[0];
+            var audioFormat = requestedFormats[1];
 
-        if (lines.Length == 0)
+            var videoUrl = GetString(videoFormat, "url");
+            var audioUrl = GetString(audioFormat, "url");
+
+            if (string.IsNullOrWhiteSpace(videoUrl) || string.IsNullOrWhiteSpace(audioUrl))
+            {
+                _logger.LogWarning("Managed playback input for {VideoId} was missing a URL in requested_formats.", videoId);
+                return null;
+            }
+
+            _logger.LogInformation("Resolved managed playback input for {VideoId}: separate video+audio", videoId);
+            return new ManagedPlaybackInput(
+                videoUrl,
+                audioUrl,
+                BuildHeaderString(videoFormat?["http_headers"]),
+                BuildHeaderString(audioFormat?["http_headers"]));
+        }
+
+        var combinedUrl = GetString(result, "url");
+        if (string.IsNullOrWhiteSpace(combinedUrl))
+        {
+            _logger.LogWarning("Managed playback input for {VideoId} did not resolve to a usable URL.", videoId);
+            return null;
+        }
+
+        _logger.LogInformation("Resolved managed playback input for {VideoId}: combined", videoId);
+        return new ManagedPlaybackInput(combinedUrl, null, BuildHeaderString(result["http_headers"]));
+    }
+
+    /// <summary>
+    /// Converts yt-dlp's per-format http_headers JSON object into an ffmpeg-compatible
+    /// CRLF-separated header block suitable for the <c>-headers</c> input option.
+    /// </summary>
+    private static string? BuildHeaderString(JsonNode? headersNode)
+    {
+        if (headersNode is not JsonObject headersObject || headersObject.Count == 0)
         {
             return null;
         }
 
-        if (lines.Length == 1)
+        var builder = new System.Text.StringBuilder();
+        foreach (var pair in headersObject)
         {
-            _logger.LogInformation("Resolved managed playback input for {VideoId}: combined", videoId);
-            return new ManagedPlaybackInput(lines[0], null);
+            string? value;
+            try
+            {
+                value = pair.Value?.GetValue<string>();
+            }
+            catch (InvalidOperationException)
+            {
+                value = pair.Value?.ToJsonString().Trim('"');
+            }
+
+            if (string.IsNullOrEmpty(value))
+            {
+                continue;
+            }
+
+            builder.Append(pair.Key).Append(": ").Append(value).Append("\r\n");
         }
 
-        _logger.LogInformation("Resolved managed playback input for {VideoId}: separate video+audio", videoId);
-        return new ManagedPlaybackInput(lines[0], lines[1]);
+        return builder.Length > 0 ? builder.ToString() : null;
     }
 
     /// <summary>Gets the currently configured playback target.</summary>
