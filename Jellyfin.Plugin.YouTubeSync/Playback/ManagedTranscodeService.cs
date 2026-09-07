@@ -60,7 +60,7 @@ public sealed class ManagedTranscodeService : IDisposable
                 return $"/YouTubeSync/session/{existingSession.SessionId}/{PlaylistFileName}";
             }
 
-            var activeSessions = _sessions.Count(static pair => !pair.Value.Process.HasExited);
+            var activeSessions = _sessions.Count(static pair => !pair.Value.HasExited);
             if (activeSessions >= Math.Max(1, config.MaxConcurrentManagedTranscodes))
             {
                 _logger.LogWarning(
@@ -84,6 +84,7 @@ public sealed class ManagedTranscodeService : IDisposable
             var playlistPath = Path.Combine(sessionDirectory, PlaylistFileName);
             var segmentPattern = Path.Combine(sessionDirectory, "segment_%03d.ts");
             var process = CreateFfmpegProcess(config, input, playlistPath, segmentPattern);
+            _logger.LogInformation("Managed transcode ffmpeg args for {VideoId}: {Args}", videoId, string.Join(" ", process.StartInfo.ArgumentList));
 
             try
             {
@@ -110,7 +111,11 @@ public sealed class ManagedTranscodeService : IDisposable
                 LastAccessUtc = DateTime.UtcNow
             };
 
-            process.Exited += (_, _) => RemoveAndDisposeSession(sessionId);
+            process.Exited += (_, _) =>
+            {
+                session.MarkExited();
+                RemoveAndDisposeSession(sessionId);
+            };
 
             _sessions[sessionId] = session;
 
@@ -189,7 +194,7 @@ public sealed class ManagedTranscodeService : IDisposable
                 continue;
             }
 
-            if (session.Process.HasExited)
+            if (session.HasExited)
             {
                 RemoveAndDisposeSession(pair.Key);
                 continue;
@@ -232,11 +237,23 @@ public sealed class ManagedTranscodeService : IDisposable
         psi.ArgumentList.Add("200M");
         psi.ArgumentList.Add("-probesize");
         psi.ArgumentList.Add("1G");
+        if (!string.IsNullOrEmpty(input.VideoHeaders))
+        {
+            psi.ArgumentList.Add("-headers");
+            psi.ArgumentList.Add(input.VideoHeaders);
+        }
+
         psi.ArgumentList.Add("-i");
         psi.ArgumentList.Add(input.VideoUrl);
 
         if (input.HasSeparateAudio)
         {
+            if (!string.IsNullOrEmpty(input.AudioHeaders))
+            {
+                psi.ArgumentList.Add("-headers");
+                psi.ArgumentList.Add(input.AudioHeaders);
+            }
+
             psi.ArgumentList.Add("-i");
             psi.ArgumentList.Add(input.AudioUrl!);
             psi.ArgumentList.Add("-map");
@@ -381,7 +398,7 @@ public sealed class ManagedTranscodeService : IDisposable
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            if (session.Process.HasExited)
+            if (session.HasExited)
             {
                 return false;
             }
@@ -410,7 +427,7 @@ public sealed class ManagedTranscodeService : IDisposable
                     break;
                 }
 
-                _logger.LogDebug("ffmpeg[{SessionId}] {Line}", sessionId, line);
+                _logger.LogInformation("ffmpeg[{SessionId}] {Line}", sessionId, line);
             }
         }
         catch (ObjectDisposedException)
@@ -434,7 +451,7 @@ public sealed class ManagedTranscodeService : IDisposable
         foreach (var pair in _sessions)
         {
             var session = pair.Value;
-            if (session.Process.HasExited)
+            if (session.HasExited)
             {
                 RemoveAndDisposeSession(pair.Key);
                 continue;
@@ -472,7 +489,7 @@ public sealed class ManagedTranscodeService : IDisposable
 
         try
         {
-            if (!session.Process.HasExited)
+            if (!session.HasExited)
             {
                 session.Process.Kill(entireProcessTree: true);
                 session.Process.WaitForExit(3000);
