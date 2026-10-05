@@ -33,4 +33,18 @@ public sealed class ManagedTranscodeSession
 
     /// <summary>Gets or sets the last time this session was accessed.</summary>
     public DateTime LastAccessUtc { get; set; } = DateTime.UtcNow;
+
+    private volatile bool _hasExited;
+
+    /// <summary>
+    /// Gets a value indicating whether the underlying process has exited.
+    /// Tracked via a flag set by the Process.Exited handler rather than reading
+    /// Process.HasExited directly, since another thread may dispose the Process
+    /// object concurrently (Process.HasExited throws InvalidOperationException
+    /// on a disposed instance).
+    /// </summary>
+    public bool HasExited => _hasExited;
+
+    /// <summary>Marks this session's process as exited. Must be called before the Process is disposed.</summary>
+    public void MarkExited() => _hasExited = true;
 }
